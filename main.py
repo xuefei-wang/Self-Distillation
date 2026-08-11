@@ -138,6 +138,10 @@ if __name__ == "__main__":
         max_completion_length = 1024,
         num_train_epochs = args.num_train_epochs,
         max_steps = args.max_steps,
+        # Non-reentrant gradient checkpointing is required for multi-GPU DDP: the default reentrant
+        # variant recomputes segments in backward and double-fires DDP's param-ready hooks
+        # ("marked as ready twice") with a LoRA student. Harmless (and slightly cheaper) single-GPU.
+        gradient_checkpointing_kwargs = {"use_reentrant": False},
         num_iterations = 1,
         num_generations = 1,
         save_steps = 100,
