@@ -131,7 +131,7 @@ if __name__ == "__main__":
         report_to = "wandb",
         output_dir = args.output_dir,
         log_completions = False, # True for debugging
-        sync_ref_model = True,
+        sync_ref_model = not args.peft,   # EMA teacher sync is incompatible with a LoRA student (param zip misaligns); use the static demo-conditioned teacher under LoRA
         ref_model_sync_steps = 1,
         ref_model_mixup_alpha = args.ref_model_mixup_alpha,
         vllm_importance_sampling_correction = True,
