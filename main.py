@@ -18,6 +18,12 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-7B-Instruct", help="Model name")
     parser.add_argument("--dataset_name", type=str, default="tooluse", help="Dataset name", choices=["tooluse", "science"])
     parser.add_argument("--seed", type=int, default=42, help="Seed")
+    parser.add_argument("--peft", action="store_true", help="Use LoRA")
+    parser.add_argument("--lora_r", type=int, default=16)
+    parser.add_argument("--lora_alpha", type=int, default=32)
+    parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--init_model_path", type=str, default=None,
+                        help="Path to init weights (merged checkpoint for stage 2). Defaults to --model_name.")
     return parser.parse_args()
 
 def load_tooluse_dataset(seed=42) -> Dataset:
@@ -81,15 +87,18 @@ Now answer with a response of your own, including the thinking process.
 
 if __name__ == "__main__":
     args = parse_args()
+    init_path = args.init_model_path or args.model_name
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
+        init_path,
         torch_dtype=torch.bfloat16,
     )
     teacher_model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
+        init_path,
         torch_dtype=torch.bfloat16,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    from nothinking import patch_tokenizer
+    patch_tokenizer(tokenizer)
     if args.dataset_name == "tooluse":
         dataset, _ = load_tooluse_dataset(args.seed)
     elif args.dataset_name == "science":
@@ -128,11 +137,20 @@ if __name__ == "__main__":
         vllm_importance_sampling_correction = True,
         num_loss_tokens_to_skip = 3,
     )
+    peft_config = None
+    if args.peft:
+        from peft import LoraConfig
+        peft_config = LoraConfig(
+            r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
+            target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
+            task_type="CAUSAL_LM",
+        )
     trainer = DistilTrainer(
         model=model,
         ref_model=teacher_model,
         args=config,
         train_dataset=dataset,
         processing_class=tokenizer,
+        peft_config=peft_config,
     )
     trainer.train()
