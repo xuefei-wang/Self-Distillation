@@ -22,22 +22,25 @@ def parse_args():
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=42, help="Seed")
+    parser.add_argument("--max_steps", type=int, default=-1, help="Cap optimizer steps (for smoke tests); -1 = full run")
     return parser.parse_args()
 
 
 def build_dataset(name, seed=42) -> Dataset:
-    """Build chat-formatted (prompt, golden-completion) SFT examples."""
+    """Build TRL prompt-completion SFT examples.
+
+    Uses the (prompt, completion) conversational format rather than a single `messages`
+    list so TRL masks the prompt tokens automatically and computes loss ONLY on the golden
+    completion — without requiring `{% generation %}` tags in the chat template (Qwen3's
+    template has none, which makes `assistant_only_loss=True` unusable)."""
     if name == "science":
         train_dir = "data/science_data/train_data"
         dataset = load_from_disk(train_dir)
 
         def format_example(example):
             return {
-                "messages": [
-                    example["messages"][0],
-                    example["messages"][1],
-                    {"role": "assistant", "content": example["output_text"]},
-                ]
+                "prompt": [example["messages"][0], example["messages"][1]],  # system, user
+                "completion": [{"role": "assistant", "content": example["output_text"]}],
             }
 
         dataset = dataset.map(format_example, remove_columns=dataset.column_names)
@@ -47,10 +50,8 @@ def build_dataset(name, seed=42) -> Dataset:
 
         def format_example(example):
             return {
-                "messages": [
-                    {"role": "user", "content": example["prompt"]},
-                    {"role": "assistant", "content": "\n".join(example["golden_response"])},
-                ]
+                "prompt": [{"role": "user", "content": example["prompt"]}],
+                "completion": [{"role": "assistant", "content": "\n".join(example["golden_response"])}],
             }
 
         dataset = dataset.map(format_example, remove_columns=dataset.column_names)
@@ -86,6 +87,7 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs,
+        max_steps=args.max_steps,
         per_device_train_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         warmup_steps=10,
@@ -99,7 +101,8 @@ if __name__ == "__main__":
         report_to="none",
         max_length=3072,
         packing=False,
-        assistant_only_loss=True,  # train only on the golden completion tokens
+        # Loss is computed on the completion only: the (prompt, completion) dataset format masks
+        # the prompt tokens automatically, so no assistant_only_loss / generation-tag template needed.
     )
 
     trainer = SFTTrainer(

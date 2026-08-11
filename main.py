@@ -12,7 +12,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Distil Trainer")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate")
     parser.add_argument("--num_train_epochs", type=int, default=1, help="Number of training epochs")
-    parser.add_argument("--num_prompts_per_batch", type=int, default=32, help="Number of prompts per batch")
+    parser.add_argument("--num_prompts_per_batch", type=int, default=32, help="Effective prompts per optimizer step (per_device_batch * grad_accum)")
+    parser.add_argument("--per_device_train_batch_size", type=int, default=4,
+                        help="Prompts generated together per micro-batch. Higher = fewer vLLM sleep/wake "
+                             "cycles per step (big speedup) at the cost of more activation memory. Must divide num_prompts_per_batch.")
     parser.add_argument("--ref_model_mixup_alpha", type=float, default=0.01, help="Reference model mixup alpha")
     parser.add_argument("--output_dir", type=str, help="Output directory")
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-7B-Instruct", help="Model name")
@@ -24,6 +27,10 @@ def parse_args():
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--init_model_path", type=str, default=None,
                         help="Path to init weights (merged checkpoint for stage 2). Defaults to --model_name.")
+    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.45,
+                        help="vLLM colocate GPU memory fraction. 0.45 fits an 8B student+vLLM on a 48GB GPU "
+                             "once the separate teacher copy is dropped under --peft.")
+    parser.add_argument("--max_steps", type=int, default=-1, help="Cap optimizer steps (for smoke tests); -1 = full run")
     return parser.parse_args()
 
 def load_tooluse_dataset(seed=42) -> Dataset:
@@ -92,10 +99,16 @@ if __name__ == "__main__":
         init_path,
         torch_dtype=torch.bfloat16,
     )
-    teacher_model = AutoModelForCausalLM.from_pretrained(
-        init_path,
-        torch_dtype=torch.bfloat16,
-    )
+    # Under LoRA, the teacher is the student's own base with the adapter disabled (handled in
+    # DistilTrainer.compute_loss), so we do NOT load a second full model — this is what lets an
+    # 8B SDFT run fit alongside the vLLM rollout engine on a single 48GB GPU. Without --peft
+    # (full fine-tuning) we still load a separate frozen teacher.
+    teacher_model = None
+    if not args.peft:
+        teacher_model = AutoModelForCausalLM.from_pretrained(
+            init_path,
+            torch_dtype=torch.bfloat16,
+        )
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     from nothinking import patch_tokenizer
     patch_tokenizer(tokenizer)
@@ -110,20 +123,21 @@ if __name__ == "__main__":
         seed=args.seed,
         use_vllm = True,
         vllm_mode="colocate",
-        vllm_tensor_parallel_size=1, 
-        vllm_gpu_memory_utilization=0.3,
-        vllm_enable_sleep_mode=True, 
+        vllm_tensor_parallel_size=1,
+        vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+        vllm_enable_sleep_mode=True,
         learning_rate = args.learning_rate,
         warmup_ratio = 0.1,
         lr_scheduler_type = "cosine",
         logging_steps = 1,
         bf16 = True,
         fp16 = False,
-        per_device_train_batch_size = 1,
-        gradient_accumulation_steps = args.num_prompts_per_batch,
+        per_device_train_batch_size = args.per_device_train_batch_size,
+        gradient_accumulation_steps = max(1, args.num_prompts_per_batch // args.per_device_train_batch_size),
         max_prompt_length = 1024,
         max_completion_length = 1024,
         num_train_epochs = args.num_train_epochs,
+        max_steps = args.max_steps,
         num_iterations = 1,
         num_generations = 1,
         save_steps = 100,
@@ -154,3 +168,6 @@ if __name__ == "__main__":
         peft_config=peft_config,
     )
     trainer.train()
+    # Persist the FINAL adapter (save_steps only writes periodic checkpoints; without this the
+    # last training state is lost and the merge step has no final adapter to load).
+    trainer.save_model(args.output_dir)
