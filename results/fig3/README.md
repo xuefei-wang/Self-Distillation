@@ -54,6 +54,24 @@ regex match). 1 seed.
 - 1 seed → no error bars; small eval sets → some noise in absolute numbers. The reproduction
   targets the qualitative trend, which holds clearly.
 
+## Note: why SFT ≈ SDFT on Tool Use (not a bug)
+
+SDFT does not beat SFT on the Tool Use axis (0.619 vs 0.660), unlike on Science (0.578 vs
+0.493). This is expected, not a defect:
+
+- The gap is **4 of 97 examples** (z ≈ 0.6) — within noise; the two methods are tied on Tool Use.
+- **Base Qwen3-8B already scores 0.598 on Tool Use** — little headroom. SDFT distills from a
+  demonstration-conditioned teacher; when the base is already strong, that teacher is barely
+  better than base, so there is little signal to distill. Gains track headroom: Science (base
+  0.412) → SDFT +0.166 vs SFT +0.081; Tool Use (base 0.598) → SDFT +0.021 vs SFT +0.062.
+- SDFT's Tool Use "misses" are well-formed, sensible tool calls that differ on a subtle argument
+  under exact-match — not format or tool-selection failures.
+- Consistent with the paper's §4.4 / Figure 5: SDFT's advantage scales with how much the model can
+  gain in-context; a high-base-rate task leaves little to gain.
+
+The Figure 3 *forgetting* claim is carried by the earlier task (Science), which has the headroom:
+SDFT retains it, SFT forgets it.
+
 ## How to reproduce
 
 ```bash
