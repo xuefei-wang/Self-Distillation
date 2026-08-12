@@ -81,6 +81,15 @@ and the experiment re-run as the paper's full 3-stage sequence. Figure:
 
 ![3-task Figure 3](figure3_reproduction_3task.png)
 
+**Paper-layout version** (`figure3_reproduction_paper_style.png`, via `plot_fig3_paper_style.py`)
+matches the paper's Figure 3 layout — two panels **(a) SDFT | (b) SFT**, one line per task, with
+training-phase dividers. Deviations are data-driven, not stylistic: x-axis is discrete training
+**stage** (we evaluated only at stage boundaries, not continuously per gradient step); **1 seed**
+(no confidence bands); and the **Medical** line is greyed as its normalization is degenerate
+(base ≈ max headroom). Science is the load-bearing result: SDFT retains it, SFT forgets it.
+
+![3-task Figure 3, paper layout](figure3_reproduction_paper_style.png)
+
 ### Raw accuracies (accuracy_3task.json)
 
 | checkpoint | science | tooluse | medical |
