@@ -8,7 +8,7 @@ from peft import LoraConfig
 
 def parse_args():
     parser = argparse.ArgumentParser(description="SFT baseline")
-    parser.add_argument("--dataset_name", type=str, required=True, choices=["science", "tooluse"], help="Dataset name")
+    parser.add_argument("--dataset_name", type=str, required=True, choices=["science", "tooluse", "medical"], help="Dataset name")
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen3-8B", help="Model name")
     parser.add_argument("--init_model_path", type=str, default=None,
                          help="Path to init weights (merged checkpoint for stage 2). Defaults to --model_name.")
@@ -35,6 +35,17 @@ def build_dataset(name, seed=42) -> Dataset:
     template has none, which makes `assistant_only_loss=True` unusable)."""
     if name == "science":
         train_dir = "data/science_data/train_data"
+        dataset = load_from_disk(train_dir)
+
+        def format_example(example):
+            return {
+                "prompt": [example["messages"][0], example["messages"][1]],  # system, user
+                "completion": [{"role": "assistant", "content": example["output_text"]}],
+            }
+
+        dataset = dataset.map(format_example, remove_columns=dataset.column_names)
+    elif name == "medical":
+        train_dir = "data/medical_data/train_data"  # same schema as science (messages + output_text)
         dataset = load_from_disk(train_dir)
 
         def format_example(example):

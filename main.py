@@ -19,7 +19,7 @@ def parse_args():
     parser.add_argument("--ref_model_mixup_alpha", type=float, default=0.01, help="Reference model mixup alpha")
     parser.add_argument("--output_dir", type=str, help="Output directory")
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-7B-Instruct", help="Model name")
-    parser.add_argument("--dataset_name", type=str, default="tooluse", help="Dataset name", choices=["tooluse", "science"])
+    parser.add_argument("--dataset_name", type=str, default="tooluse", help="Dataset name", choices=["tooluse", "science", "medical"])
     parser.add_argument("--seed", type=int, default=42, help="Seed")
     parser.add_argument("--peft", action="store_true", help="Use LoRA")
     parser.add_argument("--lora_r", type=int, default=16)
@@ -92,6 +92,41 @@ Now answer with a response of your own, including the thinking process.
     return dataset, None
 
 
+def load_medical_dataset(seed=42) -> Dataset:
+    """Load and prepare medical dataset (HuatuoGPT-o1) with formatted prompts.
+
+    Same on-disk schema as science (messages + output_text), so the same formatting applies."""
+    path = 'data/medical_data/train_data'
+    print(f"Loading medical dataset from {path}")
+    dataset = load_from_disk(path)
+
+    def format_example(example):
+        teacher_prompt = Template("""
+$orig_content
+
+This is an example for a response to the question:
+$output_text
+
+Now answer with a response of your own, including the thinking process.
+""")
+
+        return {
+            "prompt": example["messages"],
+            "teacher_prompt": [
+                example["messages"][0],
+                {'role': 'user', 'content': teacher_prompt.substitute(
+                    orig_content=example['messages'][1]['content'],
+                    output_text=example['output_text']
+                )},
+            ],
+        }
+
+    dataset = dataset.map(format_example, remove_columns=dataset.column_names)
+    dataset = dataset.shuffle(seed=seed)
+    print(f"Loaded {len(dataset)} training examples")
+    return dataset, None
+
+
 if __name__ == "__main__":
     args = parse_args()
     init_path = args.init_model_path or args.model_name
@@ -116,6 +151,8 @@ if __name__ == "__main__":
         dataset, _ = load_tooluse_dataset(args.seed)
     elif args.dataset_name == "science":
         dataset, _ = load_science_dataset(args.seed)
+    elif args.dataset_name == "medical":
+        dataset, _ = load_medical_dataset(args.seed)
     else:
         raise ValueError(f"Invalid dataset name: {args.dataset_name}")
 
