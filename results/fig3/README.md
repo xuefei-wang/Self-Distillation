@@ -72,6 +72,48 @@ SDFT does not beat SFT on the Tool Use axis (0.619 vs 0.660), unlike on Science 
 The Figure 3 *forgetting* claim is carried by the earlier task (Science), which has the headroom:
 SDFT retains it, SFT forgets it.
 
+## 3-task extension — full Figure 3 (Science → Tool Use → Medical)
+
+The Medical task (HuatuoGPT-o1) was built (`prep_medical.py`; train = medical-o1-reasoning-SFT,
+eval = medical-o1-verifiable-problem, 507 short-answer questions graded by normalized containment)
+and the experiment re-run as the paper's full 3-stage sequence. Figure:
+`figure3_reproduction_3task.png` (3 panels, one per task; 4 stages: base, +Science, +ToolUse, +Medical).
+
+![3-task Figure 3](figure3_reproduction_3task.png)
+
+### Raw accuracies (accuracy_3task.json)
+
+| checkpoint | science | tooluse | medical |
+|---|---|---|---|
+| base (Qwen3-8B) | 0.4122 | 0.5979 | 0.1815 |
+| **SDFT** +Science | 0.5779 | 0.5876 | 0.1953 |
+| **SDFT** +Science+ToolUse | 0.5680 | 0.6186 | 0.1815 |
+| **SDFT** +Science+ToolUse+Medical | 0.5582 | 0.5876 | 0.1815 |
+| **SFT** +Science | 0.4931 | 0.5979 | 0.1657 |
+| **SFT** +Science+ToolUse | 0.3550 | 0.6598 | 0.1243 |
+| **SFT** +Science+ToolUse+Medical | 0.3176 | 0.6186 | 0.1854 |
+
+### Reading it
+
+- **Science (the retention story, has headroom).** After sequentially learning all three tasks,
+  **SDFT retains Science at 0.558** (normalized 0.88) — barely below its post-Science peak of 0.578.
+  **SFT decays to 0.318** (normalized −0.57), well *below* base (0.412): learning Tool Use then
+  Medical progressively erased Science. This is the Figure 3 result.
+- **Medical erosion under SFT.** SFT's Medical drops 0.182 → 0.166 → 0.124 as it trains Science then
+  Tool Use (forgetting a skill it had zero-shot), then recovers to 0.185 only once Medical is finally
+  the training task. SDFT holds Medical flat (~0.18) throughout — no erosion.
+- **Tool Use.** Both learn it; SFT peaks higher (0.660 vs 0.619) — the high-base-rate / low-headroom
+  tie discussed above.
+
+### Caveat on the Medical panel's y-axis
+
+The Medical panel's normalization is near-degenerate: base (0.182) ≈ max-across-methods (0.195), so
+the denominator is tiny (0.013) and small raw swings blow up (SFT's 0.124 becomes −4.1 normalized).
+The Medical *raw* numbers are the honest read — Medical has almost no headroom above base for either
+method, so its normalized panel is visually dramatic but represents ≤0.06 absolute movement. The
+load-bearing panel is Science, which has real headroom and shows the clean SDFT-retains / SFT-forgets
+split.
+
 ## How to reproduce
 
 ```bash
