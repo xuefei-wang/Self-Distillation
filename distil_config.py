@@ -498,6 +498,17 @@ class DistilConfig(TrainingArguments):
                    "If False (default), use the student model for generation (standard RL behavior)."
         },
     )
+    ema_teacher_lora: bool = field(
+        default=False,
+        metadata={
+            "help": "LoRA only. If True, the demonstration-conditioned SDFT teacher uses a second, "
+            "frozen LoRA adapter that is an exponential moving average of the trainable adapter, "
+            "instead of the plain base model (adapter disabled). The teacher is thus a lagged copy "
+            "of the student that still sees the demonstration in-context. The EMA rate and cadence "
+            "reuse `ref_model_mixup_alpha` (alpha in ema = (1-alpha)*ema + alpha*student) and "
+            "`ref_model_sync_steps`. Requires a PEFT/LoRA model; ignored for full fine-tuning."
+        },
+    )
     num_iterations: int = field(
         default=1,
         metadata={"help": "Number of iterations per batch (denoted as μ in the algorithm)."},

@@ -16,7 +16,7 @@ import inspect
 import os
 import textwrap
 from collections import defaultdict, deque
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
@@ -148,6 +148,62 @@ class MemoryEfficientSyncRefModelCallback(TrainerCallback):
             if self.accelerator:
                 model = self.accelerator.unwrap_model(model)
             self.sync_target_model_memory_efficient(model, self.ref_model, args.ref_model_mixup_alpha)
+
+
+def add_ema_teacher_adapter(model, base_adapter=None):
+    """Add a frozen second LoRA adapter "ema_teacher" that mirrors the trainable adapter.
+
+    Under LoRA the SDFT teacher is normally the base model with the adapter disabled. With this,
+    the teacher instead uses an EMA copy of the trainable adapter (still conditioned on the
+    demonstration at scoring time). No second full model is loaded — just one extra adapter's
+    A/B matrices. Returns the trainable ("base") adapter name so callers can restore it.
+
+    Sidesteps the param-zip misalignment that blocks the full-model EMA path under LoRA: the EMA
+    lives in a same-shaped sibling adapter, updated by matching adapter tensors by name."""
+    base = base_adapter or getattr(model, "active_adapter", "default")
+    if isinstance(base, (list, tuple)):
+        base = base[0]
+    model.add_adapter("ema_teacher", model.peft_config[base])
+    params = dict(model.named_parameters())
+    src = f".{base}."
+    with torch.no_grad():
+        for name, p in params.items():
+            if "lora_" in name and src in name:
+                ema_name = name.replace(src, ".ema_teacher.")
+                if ema_name in params:
+                    params[ema_name].data.copy_(p.data)
+    for name, p in model.named_parameters():
+        if ".ema_teacher." in name:
+            p.requires_grad_(False)
+    model.set_adapter(base)  # keep the trainable adapter active for the student forward
+    return base
+
+
+class EMATeacherAdapterCallback(TrainerCallback):
+    """Every `sync_steps`, EMA-update the frozen "ema_teacher" adapter toward the trainable one:
+    ema = (1 - alpha) * ema + alpha * student. Same math as the full-model EMA sync, but restricted
+    to the LoRA A/B tensors so it works with a PEFT student."""
+
+    def __init__(self, accelerator, base_adapter, alpha, sync_steps):
+        self.accelerator = accelerator
+        self.base_adapter = base_adapter
+        self.alpha = alpha
+        self.sync_steps = max(1, int(sync_steps))
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step % self.sync_steps != 0:
+            return
+        model = kwargs["model"]
+        if self.accelerator:
+            model = self.accelerator.unwrap_model(model)
+        params = dict(model.named_parameters())
+        src = f".{self.base_adapter}."
+        with torch.no_grad():
+            for name, p in params.items():
+                if "lora_" in name and src in name:
+                    ep = params.get(name.replace(src, ".ema_teacher."))
+                    if ep is not None:
+                        ep.data.mul_(1.0 - self.alpha).add_(p.data, alpha=self.alpha)
 
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
 # rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
@@ -303,6 +359,19 @@ class DistilTrainer(BaseTrainer):
 
         if peft_config is not None or (is_peft_available() and isinstance(model, PeftModel)):
             model = prepare_peft_model(model, peft_config, args)
+
+        # Optional EMA teacher on a second LoRA adapter (demonstration-conditioned; see
+        # DistilConfig.ema_teacher_lora). Added right after PEFT wrapping so the extra adapter is
+        # in place before disable_dropout / optimizer creation; the EMA adapter is frozen so the
+        # optimizer never touches it.
+        self.ema_teacher_lora = getattr(args, "ema_teacher_lora", False)
+        self._ema_base_adapter = None
+        if self.ema_teacher_lora:
+            if not (is_peft_available() and isinstance(model, PeftModel)):
+                raise ValueError(
+                    "ema_teacher_lora=True requires a PEFT/LoRA model (pass peft_config / --peft)."
+                )
+            self._ema_base_adapter = add_ema_teacher_adapter(model)
 
         # Processing class
         if processing_class is None:
@@ -556,6 +625,25 @@ class DistilTrainer(BaseTrainer):
 
         if args.sync_ref_model:
             self.add_callback(MemoryEfficientSyncRefModelCallback(ref_model=self.ref_model, accelerator=self.accelerator))
+
+        if self.ema_teacher_lora:
+            self.add_callback(EMATeacherAdapterCallback(
+                accelerator=self.accelerator,
+                base_adapter=self._ema_base_adapter,
+                alpha=args.ref_model_mixup_alpha,
+                sync_steps=args.ref_model_sync_steps,
+            ))
+
+    @contextmanager
+    def _ema_teacher_adapter_context(self):
+        """Activate the frozen EMA teacher adapter for a teacher forward, then restore the
+        trainable adapter. Used in place of `disable_adapter()` when ema_teacher_lora is on."""
+        m = self.accelerator.unwrap_model(self.model)
+        m.set_adapter("ema_teacher")
+        try:
+            yield
+        finally:
+            m.set_adapter(self._ema_base_adapter)
 
     def _set_signature_columns_if_needed(self):
         # If `self.args.remove_unused_columns` is True, non-signature columns are removed.
@@ -1636,6 +1724,11 @@ class DistilTrainer(BaseTrainer):
             if self.ref_model is not None:
                 teacher_model = self.ref_model
                 teacher_ctx = nullcontext()
+            elif self.ema_teacher_lora:
+                # Teacher = base + EMA-averaged adapter (still on the demonstration-conditioned
+                # teacher_input_ids), a lagged copy of the student rather than the plain base.
+                teacher_model = self.model
+                teacher_ctx = self._ema_teacher_adapter_context()
             else:
                 teacher_model = self.model
                 teacher_ctx = self.accelerator.unwrap_model(self.model).disable_adapter()

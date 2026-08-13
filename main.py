@@ -25,6 +25,11 @@ def parse_args():
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--ema_teacher", action="store_true",
+                        help="LoRA only: use an EMA of the trainable adapter as the demonstration-"
+                             "conditioned SDFT teacher, instead of the plain base model (adapter "
+                             "disabled). EMA rate/cadence reuse --ref_model_mixup_alpha and "
+                             "ref_model_sync_steps.")
     parser.add_argument("--init_model_path", type=str, default=None,
                         help="Path to init weights (merged checkpoint for stage 2). Defaults to --model_name.")
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.45,
@@ -189,6 +194,9 @@ if __name__ == "__main__":
         sync_ref_model = not args.peft,   # EMA teacher sync is incompatible with a LoRA student (param zip misaligns); use the static demo-conditioned teacher under LoRA
         ref_model_sync_steps = 1,
         ref_model_mixup_alpha = args.ref_model_mixup_alpha,
+        # LoRA-native EMA teacher: a second, frozen adapter that is an EMA of the trainable one
+        # serves as the demonstration-conditioned teacher (vs the plain adapter-disabled base).
+        ema_teacher_lora = args.ema_teacher,
         vllm_importance_sampling_correction = True,
         num_loss_tokens_to_skip = 3,
     )

@@ -47,6 +47,23 @@ pip install -r requirements.txt
 
 ### 4. Usage
 
+#### SDFT teacher under LoRA (`--ema_teacher`)
+
+With `--peft`, the demonstration-conditioned SDFT teacher is, by default, the student's own base
+model with the LoRA adapter disabled — a *static* teacher that shares the student's base weights
+(so no second full model is loaded). Passing `--ema_teacher` instead makes the teacher a second,
+frozen LoRA adapter that is an exponential moving average of the trainable adapter, still scored on
+the demonstration-conditioned context. The teacher is then a *lagged copy of the student* rather
+than the frozen base. The EMA rate and cadence reuse `--ref_model_mixup_alpha` (default `0.01`) and
+`ref_model_sync_steps`. This is the LoRA-native counterpart of the full-model EMA teacher sync
+(`sync_ref_model`), which is only used for full fine-tuning. Add the flag to any training command:
+
+```bash
+python main.py --dataset_name tooluse --model_name Qwen/Qwen3-8B \
+  --peft --ema_teacher --ref_model_mixup_alpha 0.01 \
+  --output_dir <output_path> --learning_rate 1e-4 --num_train_epochs 2
+```
+
 #### Tooluse
 
 Training:
