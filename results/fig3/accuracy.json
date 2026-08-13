@@ -1,0 +1,22 @@
+{
+  "base": {
+    "science": 0.41222879684418146,
+    "tooluse": 0.5979381443298969
+  },
+  "sdft_science": {
+    "science": 0.5779092702169625,
+    "tooluse": 0.5876288659793815
+  },
+  "sdft_science_tooluse": {
+    "science": 0.5680473372781065,
+    "tooluse": 0.6185567010309279
+  },
+  "sft_science": {
+    "science": 0.4930966469428008,
+    "tooluse": 0.5979381443298969
+  },
+  "sft_science_tooluse": {
+    "science": 0.35502958579881655,
+    "tooluse": 0.6597938144329897
+  }
+}

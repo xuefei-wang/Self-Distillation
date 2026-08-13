@@ -5,4 +5,4 @@ __pycache__/
 wandb/
 results/
 bsub_outputs/
-.hyperparameter_search_scripts_main/
+.hyperparameter_search_scripts_main/ckpt/

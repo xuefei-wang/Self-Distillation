@@ -1627,19 +1627,32 @@ class DistilTrainer(BaseTrainer):
         )
 
         with torch.no_grad():
-            teacher_per_token_logps, teacher_all_logps, teacher_entropies = self._get_per_token_logps_and_entropies(
-                self.ref_model,
-                teacher_input_ids,
-                teacher_attention_mask,
-                logits_to_keep,
-                compute_entropy=True,
-                pixel_values=inputs.get("pixel_values"),
-                image_grid_thw=inputs.get("image_grid_thw"),
-                num_images=inputs.get("num_images"),
-                pixel_attention_mask=inputs.get("pixel_attention_mask"),
-                image_sizes=inputs.get("image_sizes"),
-                token_type_ids=inputs.get("token_type_ids"),
-            )
+            # SDFT teacher logprobs over the demonstration-conditioned context.
+            # If a separate ref_model was provided, use it. Otherwise (LoRA student) use the
+            # student's OWN base model with the adapter disabled — this is the demonstration-
+            # conditioned base policy and shares the student's base weights, so no second full
+            # model copy is loaded. Mirrors the KL-reference adapter-disable pattern above and
+            # lets LoRA SDFT fit on a single GPU alongside the vLLM rollout engine.
+            if self.ref_model is not None:
+                teacher_model = self.ref_model
+                teacher_ctx = nullcontext()
+            else:
+                teacher_model = self.model
+                teacher_ctx = self.accelerator.unwrap_model(self.model).disable_adapter()
+            with teacher_ctx:
+                teacher_per_token_logps, teacher_all_logps, teacher_entropies = self._get_per_token_logps_and_entropies(
+                    teacher_model,
+                    teacher_input_ids,
+                    teacher_attention_mask,
+                    logits_to_keep,
+                    compute_entropy=True,
+                    pixel_values=inputs.get("pixel_values"),
+                    image_grid_thw=inputs.get("image_grid_thw"),
+                    num_images=inputs.get("num_images"),
+                    pixel_attention_mask=inputs.get("pixel_attention_mask"),
+                    image_sizes=inputs.get("image_sizes"),
+                    token_type_ids=inputs.get("token_type_ids"),
+                )
 
         if self.top_entropy_quantile < 1.0:
             entropy_mask = self.get_high_entropy_mask(entropies, loss_completion_mask, 1 - self.top_entropy_quantile)
