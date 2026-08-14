@@ -306,6 +306,10 @@ if __name__ == "__main__":
         sync_ref_model = not args.peft,   # EMA teacher sync is incompatible with a LoRA student (param zip misaligns); use the static demo-conditioned teacher under LoRA
         ref_model_sync_steps = 1,
         ref_model_mixup_alpha = args.ref_model_mixup_alpha,
+        # LoRA-safe EMA teacher: a frozen "ema_teacher" adapter tracks the trainable one and
+        # conditions the teacher, instead of the plain adapter-disabled base. Reuses the two
+        # ref_model_* knobs above; no-op unless --ema_teacher (and --peft) is set.
+        ema_teacher_lora = args.ema_teacher,
         vllm_importance_sampling_correction = True,
         num_loss_tokens_to_skip = 3,
         # Exclude budget-truncated completions (no EOS/pad tail) from the loss so a clipped
