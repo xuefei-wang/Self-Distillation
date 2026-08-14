@@ -29,7 +29,10 @@ def parse_args():
     parser.add_argument("--lora_target_modules", type=str,
                         default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
                         help="Comma-separated LoRA target module suffixes. For Qwen3.5's hybrid "
-                             "layers, add the GatedDeltaNet projections in_proj_qkvz,in_proj_ba,out_proj.")
+                             "layers, add the GatedDeltaNet projections in_proj_qkv,in_proj_z,"
+                             "in_proj_b,in_proj_a,out_proj. These are SPLIT Linears in "
+                             "Qwen3_5GatedDeltaNet; the fused Qwen3-Next names (in_proj_qkvz, "
+                             "in_proj_ba) match nothing and peft drops them silently.")
     parser.add_argument("--ema_teacher", action="store_true",
                         help="LoRA only: use an EMA of the trainable adapter as the demonstration-"
                              "conditioned SDFT teacher, instead of the plain base model (adapter "
@@ -310,7 +313,11 @@ if __name__ == "__main__":
         gradient_checkpointing_kwargs = {"use_reentrant": False},
         num_iterations = 1,
         num_generations = 1,
-        save_steps = 100,
+        # Per-epoch checkpoints (checkpoint-<step>/ with the adapter) so eval_epochs.py can score
+        # every epoch. A step cadence is useless here: 93 ARC prompts at num_prompts_per_batch=32
+        # is only a couple of optimizer steps per epoch, so the old save_steps=100 never fired and
+        # nothing but the final adapter was ever written.
+        save_strategy = "epoch",
         max_grad_norm = 1,
         report_to = "wandb",
         output_dir = args.output_dir,
@@ -345,6 +352,6 @@ if __name__ == "__main__":
         peft_config=peft_config,
     )
     trainer.train()
-    # Persist the FINAL adapter (save_steps only writes periodic checkpoints; without this the
-    # last training state is lost and the merge step has no final adapter to load).
+    # Persist the FINAL adapter at the top level (save_strategy="epoch" writes only
+    # checkpoint-<step>/ dirs; without this the merge step has no final adapter to load).
     trainer.save_model(args.output_dir)
