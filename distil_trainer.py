@@ -1272,6 +1272,31 @@ class DistilTrainer(BaseTrainer):
                 else:
                     vllm_inputs = all_prompts_text
 
+                # vLLM >=0.27 removed SamplingParams.truncate_prompt_tokens and now RAISES a
+                # VLLMValidationError on any prompt longer than max_model_len instead of silently
+                # left-truncating it. When that knob is gone, pre-truncate over-long prompts here to
+                # the last max_prompt_length tokens (same left-truncation semantics — keep the tail,
+                # incl. the generation-prompt suffix) so a long rollout prompt can't crash generation.
+                # Short prompts pass through as text, unchanged; older stacks keep the SamplingParams
+                # path above, so this whole block is a no-op there.
+                if (self.max_prompt_length is not None
+                        and "truncate_prompt_tokens" not in inspect.signature(SamplingParams).parameters):
+                    truncated_inputs = []
+                    for item in vllm_inputs:
+                        text = item["prompt"] if isinstance(item, dict) else item
+                        ids = self.processing_class(text, add_special_tokens=False).input_ids
+                        if len(ids) > self.max_prompt_length:
+                            ids = ids[-self.max_prompt_length:]
+                            if isinstance(item, dict):
+                                new_item = {k: v for k, v in item.items() if k != "prompt"}
+                                new_item["prompt_token_ids"] = ids
+                                truncated_inputs.append(new_item)
+                            else:
+                                truncated_inputs.append({"prompt_token_ids": ids})
+                        else:
+                            truncated_inputs.append(item)
+                    vllm_inputs = truncated_inputs
+
                 with profiling_context(self, "vLLM.generate"):
                     all_outputs = self.llm.generate(vllm_inputs, sampling_params=sampling_params, use_tqdm=False)
 

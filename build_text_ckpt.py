@@ -7,6 +7,8 @@ vLLM (after registering the class) then load it as a plain causal LM — no visi
 param names for the SDFT weight-sync.
 """
 import sys
+import os
+import json
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from nothinking import patch_tokenizer
 

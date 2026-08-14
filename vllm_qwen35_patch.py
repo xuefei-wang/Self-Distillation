@@ -3,15 +3,22 @@
 Qwen3.5-9B ships as a VLM (Qwen3_5ForConditionalGeneration). A text-only checkpoint
 (built by build_text_ckpt.py) is still serialized by transformers in the VLM-canonical
 layout — on-disk safetensors keys are `model.language_model.*` — and transformers remaps
-them to `model.*` when loading the text `Qwen3_5ForCausalLM`. vLLM does NOT remap, and its
-stock text `Qwen3_5ForCausalLM` (qwen3_5.py) carries no `hf_to_vllm_mapper`, so it fails to
-load `model.language_model.*` off disk (and vLLM has no native text arch registered until
->=0.27 / PR #50210, which is newer than the pinned 0.25.1).
+them to `model.*` when loading the text `Qwen3_5ForCausalLM`.
 
-This subclass adds the prefix mapper `model.language_model.` -> `model.`, which fixes both
-the initial checkpoint load and the on-policy weight-sync (the sync sends already-clean
-`model.*` names, on which the mapper is a no-op). Registered by string path so it re-imports
-in the colocate vLLM worker subprocess. No-op if vLLM lacks the base class (older stacks).
+vLLM gained a working NATIVE text `Qwen3_5ForCausalLM` (weight mapper + M-RoPE + hybrid
+mamba KV-cache) in >=0.27 / PR #50210. On that stack — which is the pinned one now
+(vLLM 0.27.1) — `register()` sees the arch already supported and early-returns, so the
+native class handles the load and this subclass never runs. The subclass is kept only as a
+FALLBACK for older stacks (<0.27), whose stock text class was a `pass` stub with no
+`hf_to_vllm_mapper` and so could not load `model.language_model.*` off disk. It adds the
+prefix mapper `model.language_model.` -> `model.`, fixing both the initial checkpoint load and
+the on-policy weight-sync (the sync sends already-clean `model.*` names, a no-op for the
+mapper). Registered by string path so it re-imports in the colocate vLLM worker subprocess.
+No-op if vLLM lacks the base class.
+
+Note: `rekey_text_checkpoint` below is likewise inert on transformers 5.14 (the merge/save
+already writes bare `model.*` keys); it is retained as a safety net for layouts that still
+serialize the nested `model.language_model.*` form.
 
 See vLLM #36275 / TRL #5269 for the upstream issue.
 """
