@@ -19,7 +19,7 @@ def parse_args():
     parser.add_argument("--ref_model_mixup_alpha", type=float, default=0.01, help="Reference model mixup alpha")
     parser.add_argument("--output_dir", type=str, help="Output directory")
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-7B-Instruct", help="Model name")
-    parser.add_argument("--dataset_name", type=str, default="tooluse", help="Dataset name", choices=["tooluse", "science", "medical"])
+    parser.add_argument("--dataset_name", type=str, default="tooluse", help="Dataset name", choices=["tooluse", "science", "medical", "arc"])
     parser.add_argument("--seed", type=int, default=42, help="Seed")
     parser.add_argument("--peft", action="store_true", help="Use LoRA")
     parser.add_argument("--lora_r", type=int, default=16)
@@ -36,6 +36,13 @@ def parse_args():
                         help="vLLM colocate GPU memory fraction. 0.45 fits an 8B student+vLLM on a 48GB GPU "
                              "once the separate teacher copy is dropped under --peft.")
     parser.add_argument("--max_steps", type=int, default=-1, help="Cap optimizer steps (for smoke tests); -1 = full run")
+    parser.add_argument("--max_prompt_length", type=int, default=1024,
+                        help="Truncation cap for BOTH the student prompt and the (much longer, left-truncated) "
+                             "teacher_prompt. For ARC set this large enough to fit question+demonstration "
+                             "(~12k tokens) or the teacher loses the demonstrated task grids.")
+    parser.add_argument("--max_completion_length", type=int, default=1024,
+                        help="Student on-policy generation budget (max_new_tokens). ARC solutions are long; "
+                             "size it so completions aren't clipped mid-answer.")
     return parser.parse_args()
 
 def load_tooluse_dataset(seed=42) -> Dataset:
@@ -132,6 +139,41 @@ Now answer with a response of your own, including the thinking process.
     return dataset, None
 
 
+def load_arc_dataset(seed=42) -> Dataset:
+    """Load the ARC-AGI-1 gold-demonstration train set (built by prep_arc.py).
+
+    On-disk schema mirrors science (messages + output_text), except messages holds a single
+    user turn (the rollout question) with no system message. Arm A: the teacher is conditioned
+    on question + full gold demonstration; the student sees the question alone."""
+    path = 'data/arc_data/train_data'
+    print(f"Loading ARC dataset from {path}")
+    dataset = load_from_disk(path)
+
+    def format_example(example):
+        teacher_prompt = Template("""
+$orig_content
+
+This is an example for a response to the question:
+$output_text
+
+Now answer with a response of your own, including the thinking process.
+""")
+        return {
+            "prompt": example["messages"],
+            "teacher_prompt": [
+                {'role': 'user', 'content': teacher_prompt.substitute(
+                    orig_content=example['messages'][0]['content'],
+                    output_text=example['output_text'],
+                )},
+            ],
+        }
+
+    dataset = dataset.map(format_example, remove_columns=dataset.column_names)
+    dataset = dataset.shuffle(seed=seed)
+    print(f"Loaded {len(dataset)} training examples")
+    return dataset, None
+
+
 if __name__ == "__main__":
     args = parse_args()
     init_path = args.init_model_path or args.model_name
@@ -158,6 +200,8 @@ if __name__ == "__main__":
         dataset, _ = load_science_dataset(args.seed)
     elif args.dataset_name == "medical":
         dataset, _ = load_medical_dataset(args.seed)
+    elif args.dataset_name == "arc":
+        dataset, _ = load_arc_dataset(args.seed)
     else:
         raise ValueError(f"Invalid dataset name: {args.dataset_name}")
 
@@ -176,8 +220,8 @@ if __name__ == "__main__":
         fp16 = False,
         per_device_train_batch_size = args.per_device_train_batch_size,
         gradient_accumulation_steps = max(1, args.num_prompts_per_batch // args.per_device_train_batch_size),
-        max_prompt_length = 1024,
-        max_completion_length = 1024,
+        max_prompt_length = args.max_prompt_length,
+        max_completion_length = args.max_completion_length,
         num_train_epochs = args.num_train_epochs,
         max_steps = args.max_steps,
         # Non-reentrant gradient checkpointing is required for multi-GPU DDP: the default reentrant
@@ -194,9 +238,6 @@ if __name__ == "__main__":
         sync_ref_model = not args.peft,   # EMA teacher sync is incompatible with a LoRA student (param zip misaligns); use the static demo-conditioned teacher under LoRA
         ref_model_sync_steps = 1,
         ref_model_mixup_alpha = args.ref_model_mixup_alpha,
-        # LoRA-native EMA teacher: a second, frozen adapter that is an EMA of the trainable one
-        # serves as the demonstration-conditioned teacher (vs the plain adapter-disabled base).
-        ema_teacher_lora = args.ema_teacher,
         vllm_importance_sampling_correction = True,
         num_loss_tokens_to_skip = 3,
     )
