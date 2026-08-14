@@ -14,11 +14,11 @@ CU=$(cd .venv-qwen35-train/lib/python3.12/site-packages/nvidia/cu13 && pwd)
 MODEL=${MODEL:-ckpt/qwen35_9b_text_v2}
 LR=${LR:-1e-4}
 EPOCHS=${EPOCHS:-2}
-MAXPROMPT=${MAXPROMPT:-10240}
-MAXCOMP=${MAXCOMP:-4096}
+MAXPROMPT=${MAXPROMPT:-8192}
+MAXCOMP=${MAXCOMP:-2048}
 SFT_MAXLEN=${SFT_MAXLEN:-8192}   # SFT loads the full 9B (no vLLM offload) + expanded-LoRA optimizer
                                  # + wide-vocab logits; a smaller cap than SDFT keeps it in 48GB
-VLLM_UTIL=${VLLM_UTIL:-0.55}
+VLLM_UTIL=${VLLM_UTIL:-0.5}
 LORA_TM=${LORA_TM:-q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,in_proj_qkvz,in_proj_ba,out_proj}
 SFT_GPU=${SFT_GPU:-4}
 SDFT_GPU=${SDFT_GPU:-5}

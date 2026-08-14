@@ -233,6 +233,9 @@ if __name__ == "__main__":
         max_completion_length = args.max_completion_length,
         num_train_epochs = args.num_train_epochs,
         max_steps = args.max_steps,
+        # Recompute activations in backward to cut memory — needed for wide-vocab models like
+        # Qwen3.5 (248k vocab) where the distillation kl_div over completion tokens is large.
+        gradient_checkpointing = True,
         # Non-reentrant gradient checkpointing is required for multi-GPU DDP: the default reentrant
         # variant recomputes segments in backward and double-fires DDP's param-ready hooks
         # ("marked as ready twice") with a LoRA student. Harmless (and slightly cheaper) single-GPU.
