@@ -478,6 +478,10 @@ class DistilTrainer(BaseTrainer):
         self.beta = args.beta
         self.alpha = args.alpha
         self.generate_from_teacher = args.generate_from_teacher
+        # LoRA-safe knowledge distillation: roll out from the teacher_prompt using the student's own
+        # weights (no separate teacher model, so it works under PEFT). Treated like generate_from_teacher
+        # for prompt selection + skipping importance sampling, but never touches the vLLM teacher-weight path.
+        self.sample_from_teacher_prompt = getattr(args, "sample_from_teacher_prompt", False)
         if ref_model is not None:
             # If a reference model is provided, use it
             self.ref_model = ref_model
@@ -1457,8 +1461,12 @@ class DistilTrainer(BaseTrainer):
         if images is not None and all(img_list == [] for img_list in images):
             images = None
 
-        # Decide whether to generate from teacher (with context) or student (without context)
-        generation_prompts = teacher_prompts if self.generate_from_teacher else prompts
+        # Decide whether to generate from teacher (with context) or student (without context).
+        # sample_from_teacher_prompt rolls out from the knowledge-conditioned teacher_prompt using the
+        # student's own vLLM weights (LoRA-safe); generate_from_teacher uses a separate teacher model.
+        generation_prompts = (
+            teacher_prompts if (self.generate_from_teacher or self.sample_from_teacher_prompt) else prompts
+        )
 
         (
             _generation_prompt_ids_list,  # Discard - we'll compute student/teacher prompt IDs separately
@@ -1558,7 +1566,7 @@ class DistilTrainer(BaseTrainer):
             # distribution mismatch between vLLM and the training model can be large and harm the training.
             # Skip when generate_from_teacher=True since importance sampling is not used in that case.
             generate_every = self.args.steps_per_generation * self.num_iterations  # generation frequency
-            if not self.generate_from_teacher and (
+            if not (self.generate_from_teacher or self.sample_from_teacher_prompt) and (
                 self.args.gradient_accumulation_steps % generate_every != 0 or (
                 self.use_vllm and self.vllm_importance_sampling_correction)):
                 old_per_token_logps, _, _ = self._get_per_token_logps_and_entropies(
@@ -1576,7 +1584,8 @@ class DistilTrainer(BaseTrainer):
 
             # Compute the importance sampling ratio when using vLLM, to correct for potential distribution mismatch
             # Skip when generate_from_teacher=True since vLLM has teacher weights (no mismatch to correct)
-            if self.use_vllm and self.vllm_importance_sampling_correction and not self.generate_from_teacher:
+            if (self.use_vllm and self.vllm_importance_sampling_correction
+                    and not (self.generate_from_teacher or self.sample_from_teacher_prompt)):
                 importance_sampling_ratio = torch.exp(old_per_token_logps - sampling_per_token_logps)
                 importance_sampling_ratio = torch.clamp(
                     importance_sampling_ratio, max=self.vllm_importance_sampling_cap
@@ -1818,7 +1827,8 @@ class DistilTrainer(BaseTrainer):
             kl_loss = alpha * kl_teacher + (1 - alpha) * kl_student
         per_token_loss = kl_loss.sum(-1)
 
-        if self.use_vllm and self.vllm_importance_sampling_correction and not self.generate_from_teacher:
+        if (self.use_vllm and self.vllm_importance_sampling_correction
+                and not (self.generate_from_teacher or self.sample_from_teacher_prompt)):
             ratio = inputs["importance_sampling_ratio"]
             importance_weights = (ratio * loss_completion_mask).sum(-1) / loss_completion_mask.sum(-1).clamp(min=1.0)
             importance_weights = importance_weights.unsqueeze(-1)

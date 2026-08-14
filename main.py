@@ -33,6 +33,15 @@ def parse_args():
                              "in_proj_b,in_proj_a,out_proj. These are SPLIT Linears in "
                              "Qwen3_5GatedDeltaNet; the fused Qwen3-Next names (in_proj_qkvz, "
                              "in_proj_ba) match nothing and peft drops them silently.")
+    parser.add_argument("--sample_from_teacher_prompt", action="store_true",
+                        help="LoRA-safe knowledge distillation: roll out completions from the teacher_prompt "
+                             "(question + gold/insight) using the student's own weights, then train the student "
+                             "to reproduce them from the bare question. Fixes SDFT on tasks the base can't solve "
+                             "on-policy (where distilling its own wrong rollouts gives no signal). Skips importance "
+                             "sampling. Unlike --generate_from_teacher this works under --peft.")
+    parser.add_argument("--alpha", type=float, default=0.0,
+                        help="Distillation KL direction: 0.0=forward KL (mode-covering, default), 1.0=reverse KL "
+                             "(mode-seeking, sharpens toward the teacher's high-prob answers), in between=JSD.")
     parser.add_argument("--ema_teacher", action="store_true",
                         help="LoRA only: use an EMA of the trainable adapter as the demonstration-"
                              "conditioned SDFT teacher, instead of the plain base model (adapter "
@@ -52,7 +61,7 @@ def parse_args():
                         help="Student on-policy generation budget (max_new_tokens). ARC solutions are long; "
                              "size it so completions aren't clipped mid-answer.")
     parser.add_argument("--teacher_knowledge", type=str, default="demonstration",
-                        choices=["demonstration", "target", "insight"],
+                        choices=["demonstration", "target", "insight", "insight_demo"],
                         help="ARC only. Privileged text the SDFT teacher is conditioned on: the full gold "
                              "'demonstration' CoT (default, ~6.9k tok, Arm A); the bare oracle answer grid "
                              "'target' (~0.1k tok); or the concise 'insight' knowledge (target where absent). "
@@ -62,6 +71,11 @@ def parse_args():
                         help="ARC raw-task dir; read for --teacher_knowledge target/insight to get the oracle grids.")
     parser.add_argument("--insight_path", type=str, default=None,
                         help="Insight-knowledge jsonl (task_id, knowledge_text) for --teacher_knowledge insight.")
+    parser.add_argument("--insight_demo_dir", type=str, default=None,
+                        help="HF dataset dir (task_id, output_text) of insight-derived WORKED SOLUTIONS "
+                             "(e.g. data/arc_data/sft_insight_data) for --teacher_knowledge insight_demo. The "
+                             "student rolls out from a correct solution (like the gold arm) instead of the bare "
+                             "rule, which fixes SDFT-insight. Pair with --sample_from_teacher_prompt.")
     return parser.parse_args()
 
 def load_tooluse_dataset(seed=42) -> Dataset:
@@ -167,7 +181,8 @@ def _arc_target_text(arc_data_root, task_id):
 
 
 def load_arc_dataset(seed=42, teacher_knowledge="demonstration",
-                     arc_data_root="data/arc_agi_1", insight_path=None) -> Dataset:
+                     arc_data_root="data/arc_agi_1", insight_path=None,
+                     insight_demo_dir=None) -> Dataset:
     """Load the ARC-AGI-1 train set (built by prep_arc.py) and build the SDFT teacher_prompt.
 
     On-disk schema mirrors science (messages + output_text + task_id); messages holds a single
@@ -195,12 +210,27 @@ def load_arc_dataset(seed=42, teacher_knowledge="demonstration",
         have = sum(1 for tid in dataset["task_id"] if tid in insights)
         print(f"insight coverage: {have}/{len(dataset)} tasks (rest fall back to target)")
 
+    insight_demos = {}
+    if teacher_knowledge == "insight_demo":
+        # Use the best-of-8 insight-derived WORKED SOLUTIONS (what SFT-insight trains on) as the
+        # teacher demonstration, so the student rolls out from a correct solution (like the gold
+        # arm) instead of a bare rule it can't apply. Fixes SDFT-insight, which degrades when it
+        # rolls out from question+rule. Falls back to the oracle target grid where a demo is absent.
+        if not insight_demo_dir:
+            raise ValueError("--teacher_knowledge insight_demo requires --insight_demo_dir")
+        demo_ds = load_from_disk(insight_demo_dir)
+        insight_demos = {r["task_id"]: r["output_text"] for r in demo_ds}
+        have = sum(1 for tid in dataset["task_id"] if tid in insight_demos)
+        print(f"insight_demo coverage: {have}/{len(dataset)} tasks (rest fall back to target)")
+
     def privileged(example):
         if teacher_knowledge == "demonstration":
             return example["output_text"]
         tgt = _arc_target_text(arc_data_root, example["task_id"])
         if teacher_knowledge == "target":
             return tgt
+        if teacher_knowledge == "insight_demo":
+            return insight_demos.get(example["task_id"], tgt)
         return insights.get(example["task_id"], tgt)
 
     def format_example(example):
@@ -214,9 +244,12 @@ Now answer with a response of your own.
 """)
         return {
             "prompt": example["messages"],
+            # Teacher sees the same system turn, then the question + privileged knowledge.
+            # messages = [system, user(question)]; [-1] is the question, [0] the system turn.
             "teacher_prompt": [
+                example["messages"][0],
                 {'role': 'user', 'content': teacher_prompt.substitute(
-                    orig_content=example['messages'][0]['content'],
+                    orig_content=example['messages'][-1]['content'],
                     output_text=privileged(example),
                 )},
             ],
@@ -280,7 +313,8 @@ if __name__ == "__main__":
     elif args.dataset_name == "medical":
         dataset, _ = load_medical_dataset(args.seed)
     elif args.dataset_name == "arc":
-        dataset, _ = load_arc_dataset(args.seed, args.teacher_knowledge, args.arc_data_root, args.insight_path)
+        dataset, _ = load_arc_dataset(args.seed, args.teacher_knowledge, args.arc_data_root,
+                                      args.insight_path, args.insight_demo_dir)
         _preflight_teacher_lengths(dataset, tokenizer, args.max_prompt_length)
     else:
         raise ValueError(f"Invalid dataset name: {args.dataset_name}")
@@ -329,6 +363,10 @@ if __name__ == "__main__":
         # conditions the teacher, instead of the plain adapter-disabled base. Reuses the two
         # ref_model_* knobs above; no-op unless --ema_teacher (and --peft) is set.
         ema_teacher_lora = args.ema_teacher,
+        alpha = args.alpha,
+        # LoRA-safe knowledge distillation: sample completions from the teacher_prompt (with knowledge)
+        # so the student distills GOOD rollouts, not its own wrong ones. See DistilConfig for details.
+        sample_from_teacher_prompt = args.sample_from_teacher_prompt,
         vllm_importance_sampling_correction = True,
         num_loss_tokens_to_skip = 3,
         # Exclude budget-truncated completions (no EOS/pad tail) from the loss so a clipped
