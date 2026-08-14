@@ -8,7 +8,7 @@ from peft import LoraConfig
 
 def parse_args():
     parser = argparse.ArgumentParser(description="SFT baseline")
-    parser.add_argument("--dataset_name", type=str, required=True, choices=["science", "tooluse", "medical"], help="Dataset name")
+    parser.add_argument("--dataset_name", type=str, required=True, choices=["science", "tooluse", "medical", "arc"], help="Dataset name")
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen3-8B", help="Model name")
     parser.add_argument("--init_model_path", type=str, default=None,
                          help="Path to init weights (merged checkpoint for stage 2). Defaults to --model_name.")
@@ -23,6 +23,9 @@ def parse_args():
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=42, help="Seed")
     parser.add_argument("--max_steps", type=int, default=-1, help="Cap optimizer steps (for smoke tests); -1 = full run")
+    parser.add_argument("--max_length", type=int, default=3072,
+                        help="Max packed sequence length (prompt+completion). ARC demonstrations are long "
+                             "(~12k tokens); raise this so the trailing answer JSON isn't right-truncated.")
     return parser.parse_args()
 
 
@@ -63,6 +66,17 @@ def build_dataset(name, seed=42) -> Dataset:
             return {
                 "prompt": [{"role": "user", "content": example["prompt"]}],
                 "completion": [{"role": "assistant", "content": "\n".join(example["golden_response"])}],
+            }
+
+        dataset = dataset.map(format_example, remove_columns=dataset.column_names)
+    elif name == "arc":
+        train_dir = "data/arc_data/train_data"  # messages=[user question] + output_text=gold demonstration
+        dataset = load_from_disk(train_dir)
+
+        def format_example(example):
+            return {
+                "prompt": [example["messages"][0]],  # single user turn (no system message)
+                "completion": [{"role": "assistant", "content": example["output_text"]}],
             }
 
         dataset = dataset.map(format_example, remove_columns=dataset.column_names)
@@ -110,8 +124,13 @@ if __name__ == "__main__":
         save_strategy="no",
         seed=args.seed,
         report_to="none",
-        max_length=3072,
+        max_length=args.max_length,
         packing=False,
+        # ARC sequences (~12k tokens) at batch 1 peak near the 48GB cap without checkpointing;
+        # recompute activations in backward to fit. Left off for the short science/tooluse/medical
+        # sequences so their runtime is unchanged.
+        gradient_checkpointing=(args.dataset_name == "arc"),
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         # Loss is computed on the completion only: the (prompt, completion) dataset format masks
         # the prompt tokens automatically, so no assistant_only_loss / generation-tag template needed.
     )
