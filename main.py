@@ -7,6 +7,7 @@ from string import Template
 import argparse
 import torch.distributed as dist
 import os
+import json
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Distil Trainer")
@@ -43,6 +44,17 @@ def parse_args():
     parser.add_argument("--max_completion_length", type=int, default=1024,
                         help="Student on-policy generation budget (max_new_tokens). ARC solutions are long; "
                              "size it so completions aren't clipped mid-answer.")
+    parser.add_argument("--teacher_knowledge", type=str, default="demonstration",
+                        choices=["demonstration", "target", "insight"],
+                        help="ARC only. Privileged text the SDFT teacher is conditioned on: the full gold "
+                             "'demonstration' CoT (default, ~6.9k tok, Arm A); the bare oracle answer grid "
+                             "'target' (~0.1k tok); or the concise 'insight' knowledge (target where absent). "
+                             "Compact contexts remove the teacher-prompt truncation (42%% of demonstration "
+                             "teacher prompts exceed a 10240 cap) and the completion-length ratchet.")
+    parser.add_argument("--arc_data_root", type=str, default="data/arc_agi_1",
+                        help="ARC raw-task dir; read for --teacher_knowledge target/insight to get the oracle grids.")
+    parser.add_argument("--insight_path", type=str, default=None,
+                        help="Insight-knowledge jsonl (task_id, knowledge_text) for --teacher_knowledge insight.")
     return parser.parse_args()
 
 def load_tooluse_dataset(seed=42) -> Dataset:
@@ -139,15 +151,50 @@ Now answer with a response of your own, including the thinking process.
     return dataset, None
 
 
-def load_arc_dataset(seed=42) -> Dataset:
-    """Load the ARC-AGI-1 gold-demonstration train set (built by prep_arc.py).
+def _arc_target_text(arc_data_root, task_id):
+    """The oracle answer in the student's output schema — the compact privileged text for
+    --teacher_knowledge target (~0.1k tokens vs the ~6.9k-token gold demonstration)."""
+    with open(os.path.join(arc_data_root, "training", f"{task_id}.json")) as f:
+        task = json.load(f)
+    return json.dumps({"outputs": [t["output"] for t in task["test"]]}, separators=(",", ":"))
 
-    On-disk schema mirrors science (messages + output_text), except messages holds a single
-    user turn (the rollout question) with no system message. Arm A: the teacher is conditioned
-    on question + full gold demonstration; the student sees the question alone."""
+
+def load_arc_dataset(seed=42, teacher_knowledge="demonstration",
+                     arc_data_root="data/arc_agi_1", insight_path=None) -> Dataset:
+    """Load the ARC-AGI-1 train set (built by prep_arc.py) and build the SDFT teacher_prompt.
+
+    On-disk schema mirrors science (messages + output_text + task_id); messages holds a single
+    user turn (the rollout question), the student sees that alone. `teacher_knowledge` selects
+    the privileged text the teacher is conditioned on:
+      demonstration  the full gold CoT (Arm A, ~6.9k tok) — original behaviour;
+      target         the bare oracle answer grid (~0.1k tok);
+      insight        the concise task-level insight, falling back to target where absent.
+    The compact options remove the teacher-prompt truncation (42% of demonstration teacher
+    prompts exceed a 10240 cap and are silently left-truncated, dropping the question) and the
+    completion-length ratchet. The teacher instruction no longer asks for a thinking process:
+    render() forces thinking off, so that clause only held teacher mass off the end token."""
     path = 'data/arc_data/train_data'
-    print(f"Loading ARC dataset from {path}")
+    print(f"Loading ARC dataset from {path} (teacher_knowledge={teacher_knowledge})")
     dataset = load_from_disk(path)
+
+    insights = {}
+    if teacher_knowledge == "insight":
+        if not insight_path:
+            raise ValueError("--teacher_knowledge insight requires --insight_path")
+        with open(insight_path) as f:
+            for line in f:
+                o = json.loads(line)
+                insights[o["task_id"]] = o["knowledge_text"]
+        have = sum(1 for tid in dataset["task_id"] if tid in insights)
+        print(f"insight coverage: {have}/{len(dataset)} tasks (rest fall back to target)")
+
+    def privileged(example):
+        if teacher_knowledge == "demonstration":
+            return example["output_text"]
+        tgt = _arc_target_text(arc_data_root, example["task_id"])
+        if teacher_knowledge == "target":
+            return tgt
+        return insights.get(example["task_id"], tgt)
 
     def format_example(example):
         teacher_prompt = Template("""
@@ -156,14 +203,14 @@ $orig_content
 This is an example for a response to the question:
 $output_text
 
-Now answer with a response of your own, including the thinking process.
+Now answer with a response of your own.
 """)
         return {
             "prompt": example["messages"],
             "teacher_prompt": [
                 {'role': 'user', 'content': teacher_prompt.substitute(
                     orig_content=example['messages'][0]['content'],
-                    output_text=example['output_text'],
+                    output_text=privileged(example),
                 )},
             ],
         }
@@ -172,6 +219,26 @@ Now answer with a response of your own, including the thinking process.
     dataset = dataset.shuffle(seed=seed)
     print(f"Loaded {len(dataset)} training examples")
     return dataset, None
+
+
+def _preflight_teacher_lengths(dataset, tokenizer, max_prompt_length):
+    """Make teacher-prompt truncation LOUD instead of silent. The trainer left-truncates the
+    teacher prompt to max_prompt_length, which drops the question for over-cap rows. Print the
+    over-cap fraction; raise if it exceeds 0.5 so a mis-sized cap fails fast rather than
+    corrupting the teacher signal for most of the data."""
+    over = 0
+    for ex in dataset:
+        txt = tokenizer.apply_chat_template(ex["teacher_prompt"], tokenize=False, add_generation_prompt=True)
+        if len(tokenizer(txt).input_ids) > max_prompt_length:
+            over += 1
+    frac = over / max(len(dataset), 1)
+    print(f"[preflight] teacher prompts over max_prompt_length={max_prompt_length}: "
+          f"{over}/{len(dataset)} ({frac:.1%})")
+    if frac > 0.5:
+        raise ValueError(
+            f"{frac:.1%} of teacher prompts exceed max_prompt_length={max_prompt_length} and would be "
+            "left-truncated (question dropped). Raise --max_prompt_length or use a compact "
+            "--teacher_knowledge (target/insight).")
 
 
 if __name__ == "__main__":
@@ -201,7 +268,8 @@ if __name__ == "__main__":
     elif args.dataset_name == "medical":
         dataset, _ = load_medical_dataset(args.seed)
     elif args.dataset_name == "arc":
-        dataset, _ = load_arc_dataset(args.seed)
+        dataset, _ = load_arc_dataset(args.seed, args.teacher_knowledge, args.arc_data_root, args.insight_path)
+        _preflight_teacher_lengths(dataset, tokenizer, args.max_prompt_length)
     else:
         raise ValueError(f"Invalid dataset name: {args.dataset_name}")
 
@@ -238,8 +306,15 @@ if __name__ == "__main__":
         sync_ref_model = not args.peft,   # EMA teacher sync is incompatible with a LoRA student (param zip misaligns); use the static demo-conditioned teacher under LoRA
         ref_model_sync_steps = 1,
         ref_model_mixup_alpha = args.ref_model_mixup_alpha,
+        # LoRA-safe EMA teacher: a frozen "ema_teacher" adapter tracks the trainable one and
+        # conditions the teacher, instead of the plain adapter-disabled base. Reuses the two
+        # ref_model_* knobs above; no-op unless --ema_teacher (and --peft) is set.
+        ema_teacher_lora = args.ema_teacher,
         vllm_importance_sampling_correction = True,
         num_loss_tokens_to_skip = 3,
+        # Exclude budget-truncated completions (no EOS/pad tail) from the loss so a clipped
+        # sample can't reinforce non-termination — the output half of the truncation guard.
+        mask_truncated_completions = True,
     )
     peft_config = None
     if args.peft:
