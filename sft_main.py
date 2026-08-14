@@ -24,7 +24,13 @@ def parse_args():
     parser.add_argument("--lora_target_modules", type=str,
                         default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
                         help="Comma-separated LoRA target module suffixes. For Qwen3.5's hybrid "
-                             "layers, add in_proj_qkvz,in_proj_ba,out_proj.")
+                             "layers, add the SPLIT GatedDeltaNet projections in_proj_qkv,"
+                             "in_proj_z,in_proj_b,in_proj_a,out_proj (the fused Qwen3-Next names "
+                             "in_proj_qkvz/in_proj_ba match nothing and peft drops them silently).")
+    parser.add_argument("--arc_data_dir", type=str, default="data/arc_data/train_data",
+                        help="ARC only. HF dataset dir with columns messages/output_text; point it "
+                             "at an alternative completions dir (e.g. insight-derived) to swap the "
+                             "SFT target without code changes.")
     parser.add_argument("--seed", type=int, default=42, help="Seed")
     parser.add_argument("--max_steps", type=int, default=-1, help="Cap optimizer steps (for smoke tests); -1 = full run")
     parser.add_argument("--max_length", type=int, default=3072,
@@ -33,7 +39,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_dataset(name, seed=42) -> Dataset:
+def build_dataset(name, seed=42, arc_data_dir="data/arc_data/train_data") -> Dataset:
     """Build TRL prompt-completion SFT examples.
 
     Uses the (prompt, completion) conversational format rather than a single `messages`
@@ -74,12 +80,12 @@ def build_dataset(name, seed=42) -> Dataset:
 
         dataset = dataset.map(format_example, remove_columns=dataset.column_names)
     elif name == "arc":
-        train_dir = "data/arc_data/train_data"  # messages=[user question] + output_text=gold demonstration
+        train_dir = arc_data_dir  # messages=[user question] + output_text=gold demonstration
         dataset = load_from_disk(train_dir)
 
         def format_example(example):
             return {
-                "prompt": [example["messages"][0]],  # single user turn (no system message)
+                "prompt": example["messages"],  # [system, user(question)]
                 "completion": [{"role": "assistant", "content": example["output_text"]}],
             }
 
@@ -102,7 +108,7 @@ if __name__ == "__main__":
     from nothinking import patch_tokenizer
     patch_tokenizer(tokenizer)
 
-    dataset = build_dataset(args.dataset_name, args.seed)
+    dataset = build_dataset(args.dataset_name, args.seed, args.arc_data_dir)
 
     peft_config = None
     if args.peft:
@@ -125,7 +131,9 @@ if __name__ == "__main__":
         max_grad_norm=1.0,
         bf16=True,
         logging_steps=1,
-        save_strategy="no",
+        # Per-epoch adapter checkpoints (checkpoint-<step>/) so eval_epochs.py can score every
+        # epoch; the final adapter is still written to output_dir by trainer.save_model below.
+        save_strategy="epoch",
         seed=args.seed,
         report_to="none",
         max_length=args.max_length,
