@@ -25,6 +25,10 @@ def parse_args():
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--lora_target_modules", type=str,
+                        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+                        help="Comma-separated LoRA target module suffixes. For Qwen3.5's hybrid "
+                             "layers, add the GatedDeltaNet projections in_proj_qkvz,in_proj_ba,out_proj.")
     parser.add_argument("--ema_teacher", action="store_true",
                         help="LoRA only: use an EMA of the trainable adapter as the demonstration-"
                              "conditioned SDFT teacher, instead of the plain base model (adapter "
@@ -176,6 +180,11 @@ Now answer with a response of your own, including the thinking process.
 
 if __name__ == "__main__":
     args = parse_args()
+    # Register a text-only Qwen3.5 arch with vLLM (maps the VLM-canonical `model.language_model.*`
+    # checkpoint layout onto vLLM's bare text model). No-op on the older Qwen3-8B stack. See
+    # vllm_qwen35_patch for the rationale (vLLM #36275 / TRL #5269).
+    import vllm_qwen35_patch
+    vllm_qwen35_patch.register()
     init_path = args.init_model_path or args.model_name
     model = AutoModelForCausalLM.from_pretrained(
         init_path,
@@ -246,7 +255,7 @@ if __name__ == "__main__":
         from peft import LoraConfig
         peft_config = LoraConfig(
             r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
-            target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
+            target_modules=[m.strip() for m in args.lora_target_modules.split(",") if m.strip()],
             task_type="CAUSAL_LM",
         )
     trainer = DistilTrainer(

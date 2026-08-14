@@ -1236,11 +1236,14 @@ class DistilTrainer(BaseTrainer):
                     "top_k": -1 if self.top_k is None else self.top_k,
                     "min_p": 0.0 if self.min_p is None else self.min_p,
                     "max_tokens": self.max_completion_length,
-                    "truncate_prompt_tokens": self.max_prompt_length,
                     "logprobs": 0,  # only return the logprob of the generated token
                 }
                 if self.args.generation_kwargs is not None:
                     generation_kwargs.update(self.args.generation_kwargs)
+                # vLLM >=0.27 removed `truncate_prompt_tokens` from SamplingParams; include it only
+                # when supported (older vLLM used by the Qwen3-8B stack still needs it).
+                if "truncate_prompt_tokens" in inspect.signature(SamplingParams).parameters:
+                    generation_kwargs["truncate_prompt_tokens"] = self.max_prompt_length
                 sampling_params = SamplingParams(**generation_kwargs)
 
                 if self.vllm_tensor_parallel_size > 1:
