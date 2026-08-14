@@ -48,7 +48,13 @@ from transformers.utils import is_datasets_available, is_flash_attn_2_available,
 
 from trl.data_utils import apply_chat_template, is_conversational, maybe_apply_chat_template, prepare_multimodal_messages
 from trl.extras.profiling import profiling_context, profiling_decorator
-from trl.extras.vllm_client import VLLMClient
+try:
+    from trl.extras.vllm_client import VLLMClient
+except Exception:
+    # Server-mode only (used under vllm_mode="server"). Under vLLM 0.25 + colocate, trl's
+    # vllm_client eagerly imports an optional vllm_ascend (Huawei NPU) module that isn't present;
+    # guard it so colocate training still imports. Referenced only in the server-mode branch.
+    VLLMClient = None
 from trl.import_utils import is_liger_kernel_available, is_vllm_available
 from trl.models import prepare_deepspeed, prepare_fsdp, prepare_peft_model, unwrap_model_for_generation
 from trl.models.utils import _ForwardRedirection
@@ -377,7 +383,10 @@ class DistilTrainer(BaseTrainer):
         # "Could not estimate the number of tokens of the input, floating-point operations will not be computed." To
         # suppress this warning, we set the "estimate_tokens" key in the model's "warnings_issued" dictionary to True.
         # This acts as a flag to indicate that the warning has already been issued.
-        model.warnings_issued["estimate_tokens"] = True
+        # transformers >=5 dropped the `warnings_issued` dict; guard so this warning-suppression
+        # boilerplate doesn't crash init (it only affects a benign FLOPs-estimate warning).
+        if hasattr(model, "warnings_issued"):
+            model.warnings_issued["estimate_tokens"] = True
 
         super().__init__(
             model=model,
