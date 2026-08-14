@@ -139,6 +139,23 @@ line 61/87/122 — fix there too if those arms are revisited.
   vs the demonstration arm's monotonic 300→930. The live preflight logged `6/381 (1.6%)` over the
   10240 cap, confirming problem B is fixed in-run.
 
+### Quick real arms — 20-step SDFT, 400 held-out eval
+
+| arm | teacher context | accuracy | correct | parse-failed |
+|---|---|---|---|---|
+| base (untrained) | — | 1.75% | 7/400 | 258/400 |
+| demonstration-SFT (peer Arm A) | full gold CoT | 1.00% | 4/400 | 253/400 |
+| **target-SDFT** | bare oracle grid | **3.25%** | 13/400 | **3**/400 |
+| **insight-SDFT** | concise insight (229/381), target fallback | **3.25%** | 13/400 | **18**/400 |
+
+20 gradient steps (NPPB 8), caps 5120/2048, LR 1e-4, Qwen3-8B, greedy eval @12288.
+The **parse-failure wall collapses 255 → 3–18** — the direct payoff of fixing both
+truncations (the model now emits short, terminating, well-formed grids) — and accuracy
+comes off the ~1% floor to ~2× base / 3× demonstration-SFT. Directional only (the
+baseline arm trains 2 full epochs); target and insight tie on accuracy, target formats
+slightly tighter. Base's real capability was partly hidden behind format failures (13
+right surfaced vs base's 7), not created by 20 steps of training.
+
 ---
 
 ## Caveats worth carrying
