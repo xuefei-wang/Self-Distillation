@@ -6,7 +6,8 @@
 Comparison prompted by "our loss curve looks very different from theirs." Findings below were
 produced by three grounded subagents (objective/loss, data/prompt, LoRA/optim) and the
 load-bearing numbers were independently re-verified (teacher-prompt token measurement,
-config lines, insight coverage). Every claim is cited `file:line`.
+config lines, insight coverage). Every claim is cited `file:line`. Full per-agent reports:
+`docs/arc-sdft-agent-reports/{objective-loss,data-prompt,lora-optim}.md`.
 
 ---
 
