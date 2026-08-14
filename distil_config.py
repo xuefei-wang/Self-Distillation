@@ -498,6 +498,19 @@ class DistilConfig(TrainingArguments):
                    "If False (default), use the student model for generation (standard RL behavior)."
         },
     )
+    sample_from_teacher_prompt: bool = field(
+        default=False,
+        metadata={
+            "help": "LoRA-compatible knowledge distillation. If True, roll out completions from the "
+                    "`teacher_prompt` (question + privileged knowledge) using the STUDENT's own weights "
+                    "already in vLLM — no separate teacher model, so unlike `generate_from_teacher` this "
+                    "works under PEFT. The student is still trained to reproduce those completions from the "
+                    "bare question (student `prompt_ids` are unchanged), distilling toward the teacher's "
+                    "knowledge-conditioned distribution. Importance sampling is skipped (the completions are "
+                    "off-policy for the question-conditioned student). Use for tasks the base can't solve "
+                    "on-policy, where distilling its own wrong rollouts gives no learning signal."
+        },
+    )
     ema_teacher_lora: bool = field(
         default=False,
         metadata={
