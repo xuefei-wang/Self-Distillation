@@ -11,7 +11,6 @@ the eval distribution matches training.
 import argparse
 import json
 import os
-import re
 
 import numpy as np
 import torch
@@ -38,75 +37,27 @@ def parse_args():
     return p.parse_args()
 
 
-def _iter_brace_objects_with_outputs(text: str):
-    """Yield every balanced {...} slice that json-parses to a dict containing "outputs",
-    in left-to-right order. Grids use '[' brackets, so balancing only braces is sufficient."""
-    for m in re.finditer(r'"outputs"', text):
-        start = text.rfind("{", 0, m.start())
-        if start == -1:
-            continue
-        depth = 0
-        for i in range(start, len(text)):
-            c = text[i]
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        obj = json.loads(text[start:i + 1])
-                    except json.JSONDecodeError:
-                        break
-                    if isinstance(obj, dict) and "outputs" in obj:
-                        yield obj
-                    break
-
-
 def extract_outputs(text: str):
-    """Extract the model's final answer grids, matching the collection pipeline's parser.
-
-    The rollout asks for exactly one JSON object; the canonical answer is the LAST fenced
-    ```json ... ``` block. We therefore prefer the last fenced code block that parses to a
-    dict with "outputs"; if none is fenced, fall back to the last brace-balanced "outputs"
-    object anywhere in the text. Returns the outputs list, or None."""
-    # 1) last fenced code block (```json ... ``` or bare ``` ... ```) with an outputs object
-    fences = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL)
-    for block in reversed(fences):
-        objs = list(_iter_brace_objects_with_outputs(block))
-        if objs:
-            return objs[-1]["outputs"]
-    # 2) last strict outputs object anywhere in the raw text
-    objs = list(_iter_brace_objects_with_outputs(text))
-    if objs:
-        return objs[-1]["outputs"]
-    # 3) lenient recovery for malformed JSON (e.g. a stray bracket): after the last "outputs",
-    #    pull the integer rows and reassemble a single grid. Only helps single-test tasks — a
-    #    multi-test task recovered as one grid fails the length check in score_task, so this
-    #    never awards false credit. Fixes raw-JSON answers that don't survive json.loads.
-    idx = text.rfind('"outputs"')
-    if idx != -1:
-        rows = re.findall(r"\[\s*-?\d+(?:\s*,\s*-?\d+)*\s*\]", text[idx:])
-        grid = []
-        for row in rows:
-            try:
-                grid.append(json.loads(row))
-            except json.JSONDecodeError:
-                grid = []
-                break
-        if grid:
-            return [grid]  # wrap the recovered 2D grid as a one-grid outputs list
+    """The FIRST JSON object carrying an "outputs" key, scanning with raw_decode so surrounding
+    prose / ```json fences are tolerated. This is the arc-train93-split corpus grader: there is
+    NO salvage path — no "last grid-shaped thing", no reassembling integers — because that graded
+    truncated non-answers as correct (22% of positively-rewarded rollouts had no answer). Returns
+    the whole dict (so the caller can enforce the one-key rule), or None."""
+    dec = json.JSONDecoder()
+    i, n = 0, len(text)
+    while i < n:
+        j = text.find("{", i)
+        if j == -1:
+            break
+        try:
+            obj, end = dec.raw_decode(text, j)
+        except json.JSONDecodeError:
+            i = j + 1
+            continue
+        if isinstance(obj, dict) and "outputs" in obj:
+            return obj
+        i = max(end, j + 1)
     return None
-
-
-def normalize_outputs(outputs):
-    """Match the collection pipeline's leniency: a response that emits a single grid directly
-    (outputs = [[int,...], ...], a 2D list of ints) instead of a list-of-grids gets wrapped to
-    [grid]. Well-formed list-of-grids (3D) is returned unchanged."""
-    if (isinstance(outputs, list) and outputs
-            and isinstance(outputs[0], list) and outputs[0]
-            and all(isinstance(v, int) for v in outputs[0])):
-        return [outputs]
-    return outputs
 
 
 def grids_equal(a, b) -> bool:
@@ -119,12 +70,36 @@ def grids_equal(a, b) -> bool:
         return False
 
 
-def score_task(parsed_outputs, oracle_outputs) -> int:
-    """1 iff parsed outputs match the oracle for every test input, else 0."""
-    parsed_outputs = normalize_outputs(parsed_outputs)
-    if not isinstance(parsed_outputs, list) or len(parsed_outputs) != len(oracle_outputs):
+def _valid_grid(g) -> bool:
+    """Rectangular, 1..30 rows/cols, integers 0-9. bool is a subclass of int and is rejected."""
+    if not isinstance(g, list) or not g or len(g) > 30:
+        return False
+    width = None
+    for row in g:
+        if not isinstance(row, list) or not row or len(row) > 30:
+            return False
+        if width is None:
+            width = len(row)
+        elif len(row) != width:
+            return False
+        for v in row:
+            if isinstance(v, bool) or not isinstance(v, int) or not (0 <= v <= 9):
+                return False
+    return True
+
+
+def score_task(parsed, oracle_outputs) -> int:
+    """1 iff the parsed object is a strict {"outputs": [grid, ...]} that matches the oracle for
+    every test input. Enforces the corpus grader: exactly the one key, a list of the right length,
+    each grid well-formed. Any deviation scores 0 (no partial credit, no salvage)."""
+    if not isinstance(parsed, dict) or set(parsed.keys()) != {"outputs"}:
         return 0
-    return int(all(grids_equal(p, o) for p, o in zip(parsed_outputs, oracle_outputs)))
+    outs = parsed["outputs"]
+    if not isinstance(outs, list) or len(outs) != len(oracle_outputs):
+        return 0
+    if not all(_valid_grid(g) for g in outs):
+        return 0
+    return int(all(grids_equal(p, o) for p, o in zip(outs, oracle_outputs)))
 
 
 def rescore_dir(results_dir: str, oracle_by_task: dict) -> dict:
@@ -180,10 +155,16 @@ def main():
         tokenizer.apply_chat_template(p, tokenize=False, add_generation_prompt=True)
         for p in prompts
     ]
+    # Qwen3.5 ends a chat turn on <|im_end|> (eos), but its checkpoint ships no
+    # generation_config and can also emit <|endoftext|> (248044) as a stop; include both so a
+    # completion is never left running to the token budget by a missed stop id.
+    stop_ids = [i for i in (tokenizer.eos_token_id,
+                            tokenizer.convert_tokens_to_ids("<|endoftext|>"))
+                if i is not None and i >= 0]
     sampling = SamplingParams(
         temperature=args.temperature,
         max_tokens=args.max_new_tokens,
-        stop_token_ids=[tokenizer.eos_token_id] if tokenizer.eos_token_id else None,
+        stop_token_ids=stop_ids or None,
     )
     print(f"Generating for {len(formatted)} ARC eval tasks...")
     outputs = llm.generate(formatted, sampling)
