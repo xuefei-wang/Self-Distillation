@@ -21,6 +21,10 @@ def parse_args():
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--lora_target_modules", type=str,
+                        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+                        help="Comma-separated LoRA target module suffixes. For Qwen3.5's hybrid "
+                             "layers, add in_proj_qkvz,in_proj_ba,out_proj.")
     parser.add_argument("--seed", type=int, default=42, help="Seed")
     parser.add_argument("--max_steps", type=int, default=-1, help="Cap optimizer steps (for smoke tests); -1 = full run")
     parser.add_argument("--max_length", type=int, default=3072,
@@ -104,7 +108,7 @@ if __name__ == "__main__":
     if args.peft:
         peft_config = LoraConfig(
             r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            target_modules=[m.strip() for m in args.lora_target_modules.split(",") if m.strip()],
             task_type="CAUSAL_LM",
         )
 
