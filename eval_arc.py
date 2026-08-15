@@ -11,7 +11,6 @@ the eval distribution matches training.
 import argparse
 import json
 import os
-import re
 
 import numpy as np
 import torch
@@ -38,75 +37,27 @@ def parse_args():
     return p.parse_args()
 
 
-def _iter_brace_objects_with_outputs(text: str):
-    """Yield every balanced {...} slice that json-parses to a dict containing "outputs",
-    in left-to-right order. Grids use '[' brackets, so balancing only braces is sufficient."""
-    for m in re.finditer(r'"outputs"', text):
-        start = text.rfind("{", 0, m.start())
-        if start == -1:
-            continue
-        depth = 0
-        for i in range(start, len(text)):
-            c = text[i]
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        obj = json.loads(text[start:i + 1])
-                    except json.JSONDecodeError:
-                        break
-                    if isinstance(obj, dict) and "outputs" in obj:
-                        yield obj
-                    break
-
-
 def extract_outputs(text: str):
-    """Extract the model's final answer grids, matching the collection pipeline's parser.
-
-    The rollout asks for exactly one JSON object; the canonical answer is the LAST fenced
-    ```json ... ``` block. We therefore prefer the last fenced code block that parses to a
-    dict with "outputs"; if none is fenced, fall back to the last brace-balanced "outputs"
-    object anywhere in the text. Returns the outputs list, or None."""
-    # 1) last fenced code block (```json ... ``` or bare ``` ... ```) with an outputs object
-    fences = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL)
-    for block in reversed(fences):
-        objs = list(_iter_brace_objects_with_outputs(block))
-        if objs:
-            return objs[-1]["outputs"]
-    # 2) last strict outputs object anywhere in the raw text
-    objs = list(_iter_brace_objects_with_outputs(text))
-    if objs:
-        return objs[-1]["outputs"]
-    # 3) lenient recovery for malformed JSON (e.g. a stray bracket): after the last "outputs",
-    #    pull the integer rows and reassemble a single grid. Only helps single-test tasks — a
-    #    multi-test task recovered as one grid fails the length check in score_task, so this
-    #    never awards false credit. Fixes raw-JSON answers that don't survive json.loads.
-    idx = text.rfind('"outputs"')
-    if idx != -1:
-        rows = re.findall(r"\[\s*-?\d+(?:\s*,\s*-?\d+)*\s*\]", text[idx:])
-        grid = []
-        for row in rows:
-            try:
-                grid.append(json.loads(row))
-            except json.JSONDecodeError:
-                grid = []
-                break
-        if grid:
-            return [grid]  # wrap the recovered 2D grid as a one-grid outputs list
+    """The FIRST JSON object carrying an "outputs" key, scanning with raw_decode so surrounding
+    prose / ```json fences are tolerated. This is the arc-train93-split corpus grader: there is
+    NO salvage path — no "last grid-shaped thing", no reassembling integers — because that graded
+    truncated non-answers as correct (22% of positively-rewarded rollouts had no answer). Returns
+    the whole dict (so the caller can enforce the one-key rule), or None."""
+    dec = json.JSONDecoder()
+    i, n = 0, len(text)
+    while i < n:
+        j = text.find("{", i)
+        if j == -1:
+            break
+        try:
+            obj, end = dec.raw_decode(text, j)
+        except json.JSONDecodeError:
+            i = j + 1
+            continue
+        if isinstance(obj, dict) and "outputs" in obj:
+            return obj
+        i = max(end, j + 1)
     return None
-
-
-def normalize_outputs(outputs):
-    """Match the collection pipeline's leniency: a response that emits a single grid directly
-    (outputs = [[int,...], ...], a 2D list of ints) instead of a list-of-grids gets wrapped to
-    [grid]. Well-formed list-of-grids (3D) is returned unchanged."""
-    if (isinstance(outputs, list) and outputs
-            and isinstance(outputs[0], list) and outputs[0]
-            and all(isinstance(v, int) for v in outputs[0])):
-        return [outputs]
-    return outputs
 
 
 def grids_equal(a, b) -> bool:
@@ -119,12 +70,45 @@ def grids_equal(a, b) -> bool:
         return False
 
 
-def score_task(parsed_outputs, oracle_outputs) -> int:
-    """1 iff parsed outputs match the oracle for every test input, else 0."""
-    parsed_outputs = normalize_outputs(parsed_outputs)
-    if not isinstance(parsed_outputs, list) or len(parsed_outputs) != len(oracle_outputs):
+def _valid_grid(g) -> bool:
+    """Rectangular, 1..30 rows/cols, integers 0-9. bool is a subclass of int and is rejected."""
+    if not isinstance(g, list) or not g or len(g) > 30:
+        return False
+    width = None
+    for row in g:
+        if not isinstance(row, list) or not row or len(row) > 30:
+            return False
+        if width is None:
+            width = len(row)
+        elif len(row) != width:
+            return False
+        for v in row:
+            if isinstance(v, bool) or not isinstance(v, int) or not (0 <= v <= 9):
+                return False
+    return True
+
+
+def format_valid(parsed, oracle_outputs) -> bool:
+    """True iff `parsed` is a strict {"outputs": [grid, ...]} of the right length with well-formed
+    grids — i.e. the model produced the required output FORMAT, regardless of whether the grids
+    are correct. Reported alongside accuracy so a format failure (e.g. the right grid emitted with
+    the wrong nesting or extra keys) can be told apart from a reasoning failure; one accuracy
+    number reads both as 0 and hides format drift (see arc-train93-split/README.md)."""
+    if not isinstance(parsed, dict) or set(parsed.keys()) != {"outputs"}:
+        return False
+    outs = parsed["outputs"]
+    if not isinstance(outs, list) or len(outs) != len(oracle_outputs):
+        return False
+    return all(_valid_grid(g) for g in outs)
+
+
+def score_task(parsed, oracle_outputs) -> int:
+    """1 iff the parsed object is a strict {"outputs": [grid, ...]} that matches the oracle for
+    every test input. Enforces the corpus grader: exactly the one key, a list of the right length,
+    each grid well-formed. Any deviation scores 0 (no partial credit, no salvage)."""
+    if not format_valid(parsed, oracle_outputs):
         return 0
-    return int(all(grids_equal(p, o) for p, o in zip(parsed_outputs, oracle_outputs)))
+    return int(all(grids_equal(p, o) for p, o in zip(parsed["outputs"], oracle_outputs)))
 
 
 def rescore_dir(results_dir: str, oracle_by_task: dict) -> dict:
@@ -135,24 +119,43 @@ def rescore_dir(results_dir: str, oracle_by_task: dict) -> dict:
     with open(resp_path) as f:
         responses = json.load(f)
     scores, parse_fail, per_task = [], 0, []
+    fmt_valid, trunc = [], []
     for item in responses:
         tid = item["task_id"]
+        oracle_outputs = oracle_by_task[tid]
         parsed = extract_outputs(item["response"])
         if parsed is None:
             parse_fail += 1
             s = 0
+            fv = False
         else:
-            s = score_task(parsed, oracle_by_task[tid])
+            s = score_task(parsed, oracle_outputs)
+            fv = format_valid(parsed, oracle_outputs)
         scores.append(s)
-        per_task.append({"task_id": tid, "correct": bool(s)})
+        fmt_valid.append(fv)
+        # finish_reason is saved by newer runs; older eval_responses.json lack it, in which case
+        # truncation cannot be recovered from text and is reported as null rather than guessed.
+        fr = item.get("finish_reason")
+        is_trunc = item["truncated"] if "truncated" in item else (fr == "length" if fr else None)
+        trunc.append(is_trunc)
+        row = {"task_id": tid, "correct": bool(s), "format_valid": fv}
+        if is_trunc is not None:
+            row["truncated"] = bool(is_trunc)
+        per_task.append(row)
     summary = {
         "accuracy": float(np.mean(scores)) if scores else 0.0,
         "num_correct": int(sum(scores)),
         "num_total": len(scores),
         "parse_failed": parse_fail,
+        "num_format_valid": int(sum(fmt_valid)),
+        "format_valid_frac": float(np.mean(fmt_valid)) if fmt_valid else 0.0,
         "per_task": per_task,
         "rescored": True,
     }
+    known_trunc = [t for t in trunc if t is not None]
+    if known_trunc:
+        summary["num_truncated"] = int(sum(known_trunc))
+        summary["truncated_frac"] = float(np.mean(known_trunc))
     with open(os.path.join(results_dir, "eval_results.json"), "w") as f:
         json.dump(summary, f, indent=2)
     return summary
@@ -180,30 +183,46 @@ def main():
         tokenizer.apply_chat_template(p, tokenize=False, add_generation_prompt=True)
         for p in prompts
     ]
+    # Qwen3.5 ends a chat turn on <|im_end|> (eos), but its checkpoint ships no
+    # generation_config and can also emit <|endoftext|> (248044) as a stop; include both so a
+    # completion is never left running to the token budget by a missed stop id.
+    stop_ids = [i for i in (tokenizer.eos_token_id,
+                            tokenizer.convert_tokens_to_ids("<|endoftext|>"))
+                if i is not None and i >= 0]
     sampling = SamplingParams(
         temperature=args.temperature,
         max_tokens=args.max_new_tokens,
-        stop_token_ids=[tokenizer.eos_token_id] if tokenizer.eos_token_id else None,
+        stop_token_ids=stop_ids or None,
     )
     print(f"Generating for {len(formatted)} ARC eval tasks...")
     outputs = llm.generate(formatted, sampling)
     responses = [o.outputs[0].text for o in outputs]
+    # "length" => the completion hit max_new_tokens and was cut off before it could emit its
+    # answer/EOS; tracked so truncation is visible instead of silently counting as wrong.
+    finish_reasons = [o.outputs[0].finish_reason for o in outputs]
+    truncated = [fr == "length" for fr in finish_reasons]
 
-    scores, parse_fail = [], 0
+    scores, parse_fail, fmt_valid = [], 0, []
     for resp, orc in zip(responses, oracle):
         parsed = extract_outputs(resp)
         if parsed is None:
             parse_fail += 1
             scores.append(0)
+            fmt_valid.append(False)
         else:
             scores.append(score_task(parsed, orc))
+            fmt_valid.append(format_valid(parsed, orc))
 
     accuracy = float(np.mean(scores))
+    fmt_frac = float(np.mean(fmt_valid)) if fmt_valid else 0.0
+    trunc_frac = float(np.mean(truncated)) if truncated else 0.0
     print("\n" + "=" * 60)
     print("ARC-AGI-1 evaluation-split results:")
     print(f"  Tasks:        {len(scores)}")
     print(f"  Correct:      {sum(scores)}")
     print(f"  Parse failed: {parse_fail}")
+    print(f"  Format valid: {sum(fmt_valid)} ({fmt_frac*100:.2f}%)")
+    print(f"  Truncated:    {sum(truncated)} ({trunc_frac*100:.2f}%)")
     print(f"  Accuracy:     {accuracy:.4f} ({accuracy*100:.2f}%)")
     print("=" * 60)
 
@@ -215,14 +234,21 @@ def main():
             "num_correct": int(sum(scores)),
             "num_total": len(scores),
             "parse_failed": parse_fail,
+            "num_format_valid": int(sum(fmt_valid)),
+            "format_valid_frac": fmt_frac,
+            "num_truncated": int(sum(truncated)),
+            "truncated_frac": trunc_frac,
             "per_task": [
-                {"task_id": t, "correct": bool(s)} for t, s in zip(task_ids, scores)
+                {"task_id": t, "correct": bool(s), "format_valid": bool(fv),
+                 "truncated": bool(tr)}
+                for t, s, fv, tr in zip(task_ids, scores, fmt_valid, truncated)
             ],
             "config": vars(args),
         }, f, indent=2)
     with open(os.path.join(out_dir, "eval_responses.json"), "w") as f:
         json.dump([
-            {"task_id": task_ids[i], "response": responses[i], "correct": bool(scores[i])}
+            {"task_id": task_ids[i], "response": responses[i], "correct": bool(scores[i]),
+             "finish_reason": finish_reasons[i], "truncated": bool(truncated[i])}
             for i in range(len(responses))
         ], f, indent=2)
     print(f"Saved results to {out_dir}/eval_results.json")
