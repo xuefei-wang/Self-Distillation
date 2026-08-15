@@ -152,8 +152,9 @@ def main():
         n_ok += int(ok)
         has_think = ("<think>" in chosen or "</think>" in chosen)
         ds_rows.append({
-            "messages": [{"role": "system", "content": SYSTEM},
-                         {"role": "user", "content": m["question"]}],
+            # Training row is nosys by default (matches prep_arc._msgs); SYSTEM stays only as the
+            # generation-time crutch above, not in the trained prompt.
+            "messages": [{"role": "user", "content": m["question"]}],
             "output_text": chosen,
             "task_id": tid,
         })

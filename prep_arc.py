@@ -3,12 +3,12 @@
 Two artifacts are written under data/arc_data/:
 
   train_data/  the 381 gold-demonstration tasks from the ARC-AGI-1 *training* split.
-               Columns: messages=[{system}, {user: question}], output_text=<gold demonstration>.
+               Columns: messages=[{user: question}], output_text=<gold demonstration>.
                Mirrors the science schema so both main.py (SDFT) and sft_main.py (SFT)
                consume it. `output_text` is knowledge type #1 (Arm A: gold demonstration).
 
   eval_data/   the 400 ARC-AGI-1 *evaluation* split tasks (held out; disjoint from train).
-               Columns: prompt=[{system}, {user: question}], task_id, test_outputs=<oracle grids>.
+               Columns: prompt=[{user: question}], task_id, test_outputs=<oracle grids>.
 
 With --train_ids <path> the *training* split is instead cut into a train / val split:
 
@@ -33,19 +33,18 @@ INSTRUCTION = (
     "ARC task:\n"
 )
 
-# System turn the gold-demonstration teacher and the published Qwen3.5-9B eval number
-# (4.906% avg@8) were generated with. Kept verbatim so train, teacher and eval all share the
-# exact prompt the baseline was measured under; see arc-train93-split/README.md ("## Prompt").
+# The system persona the 27B gold teacher and the published 9B eval number were generated with.
+# No longer used in trained/eval prompts (the ablation made no-system the default, see _msgs);
+# retained only as a generation-time crutch for eliciting good rollouts in gen_insight_sft.
 SYSTEM = "You are a precise puzzle solver. Follow the output schema exactly."
 
 
 def _msgs(question: str) -> list:
-    """Chat turns for a rollout question: a fixed system turn plus the user question.
-
-    Consumers must read the question as messages[-1] (the user turn) and any preceding
-    context as messages[:-1] — never by hardcoded index — so the schema can carry a system
-    turn without breaking SFT/SDFT prompt construction."""
-    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": question}]
+    """The chat turns every train/eval prompt carries: the question as a single user turn.
+    No system turn by default -- the ablation showed the system persona is neutral-to-mildly-
+    unhelpful (insight-nosys reached the grid's best delta), and the task instruction + schema
+    already live in the user turn. SYSTEM is kept only as a generation-time crutch (gen_insight_sft)."""
+    return [{"role": "user", "content": question}]
 
 
 def render_question(task: dict) -> str:
@@ -82,6 +81,33 @@ def build_train(gold_path: str, data_root: str, keep_ids: set | None = None) -> 
                 "task_id": g["task_id"],
             })
     print(f"train: {len(rows)} gold-demonstration tasks")
+    return Dataset.from_list(rows)
+
+
+def build_train_corpus93(corpus_dir: str, data_root: str, keep_ids: set) -> Dataset:
+    """Gold train rows from the arc-train93-split corpus (Qwen3.5-27B worked solutions).
+
+    Uses golden_knowledge.jsonl's `style=="reasoning"` rows (the 93): output_text = the 27B
+    `completion` (a non-thinking derivation ending in {"outputs":...}). The question is
+    re-rendered from the raw task (byte-identical to the row's `question`) so it matches the
+    eval rows and carries the system turn."""
+    gold = {}
+    with open(os.path.join(corpus_dir, "golden_knowledge.jsonl")) as f:
+        for line in f:
+            r = json.loads(line)
+            if r.get("style") == "reasoning":
+                gold[r["problem_id"]] = r["completion"]
+    rows = []
+    for tid in sorted(keep_ids):
+        if tid not in gold:
+            raise ValueError(f"train id {tid} has no reasoning-style gold completion in the corpus")
+        task = load_task(data_root, "training", tid)
+        rows.append({
+            "messages": _msgs(render_question(task)),
+            "output_text": gold[tid],
+            "task_id": tid,
+        })
+    print(f"train (corpus93): {len(rows)} gold-completion tasks")
     return Dataset.from_list(rows)
 
 
@@ -183,10 +209,32 @@ def main():
     p.add_argument("--train_ids", default=None,
                    help="file listing the training-split task_ids to train on (JSON array or "
                         "one id per line); the remaining training tasks become val_eval_data")
+    p.add_argument("--corpus93", default=None,
+                   help="path to the arc-train93-split corpus dir (golden_knowledge.jsonl + "
+                        "split_train93_val307.json). Builds train_data from the 27B reasoning "
+                        "completions for train_93 and val_eval_data from val_307.")
     args = p.parse_args()
 
     # test_outputs is a ragged list-of-grids; datasets handles nested lists fine. Save to disk.
-    if args.train_ids:
+    if args.corpus93:
+        split = json.load(open(os.path.join(args.corpus93, "split_train93_val307.json")))
+        train_ids, val_ids = set(split["train_93"]), set(split["val_307"])
+        split_set = set(split_task_ids(args.data_root, "training"))
+        assert train_ids <= split_set and val_ids <= split_set, "split ids not all in training split"
+        assert not (train_ids & val_ids), "train_93 and val_307 overlap"
+        assert train_ids | val_ids == split_set, "train_93 + val_307 != training split"
+        print(f"corpus93: train {len(train_ids)} / val {len(val_ids)}")
+        train = build_train_corpus93(args.corpus93, args.data_root, train_ids)
+        train_eval = build_split_eval(args.data_root, "training", keep_ids=train_ids, label="train")
+        val_eval = build_split_eval(args.data_root, "training", keep_ids=val_ids, label="val")
+        assert len(train) == len(train_ids) == 93, f"train {len(train)} != 93"
+        assert len(train_eval) == len(train_ids) and len(val_eval) == len(val_ids)
+        train.save_to_disk(os.path.join(args.out_dir, "train_data"))
+        train_eval.save_to_disk(os.path.join(args.out_dir, "train_eval_data"))
+        val_eval.save_to_disk(os.path.join(args.out_dir, "val_eval_data"))
+        print(f"saved -> {args.out_dir}/train_data ({len(train)}), "
+              f"train_eval_data ({len(train_eval)}), val_eval_data ({len(val_eval)})")
+    elif args.train_ids:
         train_ids = load_train_ids(args.train_ids)
         print(f"--train_ids {args.train_ids}: {len(train_ids)} task ids")
         train, train_eval, val_eval = build_id_split(args, train_ids)
