@@ -117,6 +117,11 @@ def main():
     merged_root = args.merged_root or os.path.join(args.adapter_dir, "_merged")
     out_path = args.out or os.path.join(args.adapter_dir, "epoch_eval.json")
     rows = []
+    n_fail = 0   # epochs where the merge failed or no split produced a metric
+
+    def write_summary():
+        with open(out_path, "w") as f:
+            json.dump({"base": args.base, "adapter_dir": args.adapter_dir, "epochs": rows}, f, indent=2)
 
     for i, (step, ckpt) in enumerate(ckpts, start=1):
         epoch = checkpoint_epoch(ckpt, i)
@@ -124,9 +129,11 @@ def main():
         rc = run([py, "merge_lora.py", "--base", args.base, "--adapter", ckpt, "--out", merged], env)
         if rc != 0:
             print(f"ERROR: merge failed for {ckpt} (rc={rc}); skipping this epoch")
+            n_fail += 1
             continue
 
         row = {"epoch": epoch, "step": step, "checkpoint": ckpt}
+        got_metrics = False
         for split, data_dir in (("train", args.train_eval_data), ("val", args.val_eval_data)):
             if not os.path.exists(data_dir):
                 print(f"[skip] {split} split: {data_dir} does not exist")
@@ -145,16 +152,32 @@ def main():
             row[f"{split}_acc"] = res["accuracy"]
             row[f"{split}_correct"] = res["num_correct"]
             row[f"{split}_total"] = res["num_total"]
+            if "format_valid_frac" in res:
+                row[f"{split}_format_valid_frac"] = res["format_valid_frac"]
+            if "truncated_frac" in res:
+                row[f"{split}_truncated_frac"] = res["truncated_frac"]
             if bands and res.get("per_task"):
                 row[f"{split}_bands"] = band_breakdown(res["per_task"], bands)
+            got_metrics = True
 
-        rows.append(row)
         if not args.keep_merged:
             shutil.rmtree(merged, ignore_errors=True)
 
+        if not got_metrics:
+            # Merge succeeded but neither split scored (missing dirs / eval crashed): don't append a
+            # metric-less row; count it as a failure so the exit code reflects reality.
+            print(f"ERROR: no split produced a metric for {ckpt}; skipping this epoch")
+            n_fail += 1
+            continue
+
+        rows.append(row)
         # Write incrementally so a crash mid-grid still leaves the finished epochs on disk.
-        with open(out_path, "w") as f:
-            json.dump({"base": args.base, "adapter_dir": args.adapter_dir, "epochs": rows}, f, indent=2)
+        write_summary()
+
+    # Always leave a summary file, even when every epoch failed, so downstream sees an explicit
+    # empty result rather than a missing file that reads as "never ran".
+    if not rows:
+        write_summary()
 
     print("\n" + "=" * 60)
     print(f"per-epoch results for {args.adapter_dir}")
@@ -168,8 +191,11 @@ def main():
               f"val {r.get('val_correct', '-')}/{r.get('val_total', '-')} "
               f"({r.get('val_acc', float('nan')):.4f})" + delta)
     print("=" * 60)
-    print(f"Saved {out_path}")
-    return 0
+    print(f"Saved {out_path}  ({len(rows)} epoch(s) scored, {n_fail} failed)")
+    if not rows:
+        print("ERROR: no epoch produced any metric")
+        return 1
+    return 1 if n_fail else 0
 
 
 if __name__ == "__main__":

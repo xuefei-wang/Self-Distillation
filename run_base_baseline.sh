@@ -4,6 +4,7 @@
 # 12288/20480 budget) that eval_epochs.py drives for the trained checkpoints -> apples-to-apples.
 set -uo pipefail
 cd "$(dirname "$0")"
+mkdir -p logs   # split stdout/stderr is redirected here; without this the redirects fail silently
 
 VENV=$(pwd)/.venv-qwen35-train/bin/python
 CU=$(cd .venv-qwen35-train/lib/python3.12/site-packages/nvidia/cu13 && pwd)
@@ -29,6 +30,15 @@ eval_split () {  # $1=gpu $2=data_dir $3=out_subdir
 
 echo "== base baseline: train split (gpu $TRAIN_GPU) + val split (gpu $VAL_GPU) =="
 eval_split "$TRAIN_GPU" "$TRAIN_EVAL" train > logs/base_baseline_train.log 2>&1 &
+train_pid=$!
 eval_split "$VAL_GPU"   "$VAL_EVAL"   val   > logs/base_baseline_val.log 2>&1 &
-wait
+val_pid=$!
+
+fail=0
+wait "$train_pid" || { echo "FAIL train split (see logs/base_baseline_train.log)"; fail=1; }
+wait "$val_pid"   || { echo "FAIL val split (see logs/base_baseline_val.log)"; fail=1; }
+if [ "$fail" -ne 0 ]; then
+  echo "== base baseline FAILED =="
+  exit 1
+fi
 echo "== base baseline done -> $OUT/{train,val}/eval_results.json =="

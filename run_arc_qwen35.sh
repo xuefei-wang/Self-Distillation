@@ -8,6 +8,7 @@
 # (linear-attention) layers. Env: venv-only CUDA toolkit + flashinfer version-check bypass.
 set -uo pipefail
 cd "$(dirname "$0")"
+mkdir -p logs   # cell stdout/stderr is redirected here; without this the redirects fail silently
 
 VENV=$(pwd)/.venv-qwen35-train/bin/python
 CU=$(cd .venv-qwen35-train/lib/python3.12/site-packages/nvidia/cu13 && pwd)
@@ -51,10 +52,12 @@ check_free () {
   echo "  GPU $1 ($2) free"
 }
 echo "== preflight =="
+# Only check the GPUs whose cells will actually run: the two insight cells are skipped when
+# their inputs are absent, so an insight GPU being busy must not abort the two gold cells.
 check_free "$SFT_GOLD_GPU"     sft_gold
-check_free "$SFT_INSIGHT_GPU"  sft_insight
 check_free "$SDFT_GOLD_GPU"    sdft_ema_gold
-check_free "$SDFT_INSIGHT_GPU" sdft_ema_insight
+[ -d "$SFT_INSIGHT_DATA" ] && check_free "$SFT_INSIGHT_GPU"  sft_insight
+[ -f "$INSIGHT_PATH" ]     && check_free "$SDFT_INSIGHT_GPU" sdft_ema_insight
 
 eval_cell () {  # $1=cell name, $2=gpu — score every epoch checkpoint on both splits
   local name=$1 gpu=$2
@@ -92,26 +95,46 @@ sdft_cell () {  # $1=cell name, $2=gpu, $3=master_port, $4..=extra flags (teache
 echo "== training 4 cells (sft_gold gpu$SFT_GOLD_GPU, sft_insight gpu$SFT_INSIGHT_GPU,"
 echo "   sdft_ema_gold gpu$SDFT_GOLD_GPU, sdft_ema_insight gpu$SDFT_INSIGHT_GPU) =="
 
+# Launch each cell in the background; track its pid + name so we can report per-cell status and
+# fail the grid if any cell errored (a bare `wait` discards exit codes and reports false success).
+declare -a PIDS NAMES
+
 sft_cell  sft_gold "$SFT_GOLD_GPU" data/arc_data/train_data 29500 \
   > logs/arc_q35_sft_gold.log 2>&1 &
+PIDS+=($!); NAMES+=(sft_gold)
 
 if [ -d "$SFT_INSIGHT_DATA" ]; then
   sft_cell sft_insight "$SFT_INSIGHT_GPU" "$SFT_INSIGHT_DATA" 29501 \
     > logs/arc_q35_sft_insight.log 2>&1 &
+  PIDS+=($!); NAMES+=(sft_insight)
 else
   echo "SKIP sft_insight: completions dir '$SFT_INSIGHT_DATA' does not exist (set SFT_INSIGHT_DATA)"
 fi
 
 sdft_cell sdft_ema_gold "$SDFT_GOLD_GPU" 29502 --teacher_knowledge demonstration \
   > logs/arc_q35_sdft_ema_gold.log 2>&1 &
+PIDS+=($!); NAMES+=(sdft_ema_gold)
 
 if [ -f "$INSIGHT_PATH" ]; then
   sdft_cell sdft_ema_insight "$SDFT_INSIGHT_GPU" 29503 \
     --teacher_knowledge insight --insight_path "$INSIGHT_PATH" \
     > logs/arc_q35_sdft_ema_insight.log 2>&1 &
+  PIDS+=($!); NAMES+=(sdft_ema_insight)
 else
   echo "SKIP sdft_ema_insight: insight jsonl '$INSIGHT_PATH' does not exist (set INSIGHT_PATH)"
 fi
 
-wait
+fail=0
+for i in "${!PIDS[@]}"; do
+  if wait "${PIDS[$i]}"; then
+    echo "OK   ${NAMES[$i]} -> ckpt/arc_q35_${NAMES[$i]}_adapter/epoch_eval.json"
+  else
+    echo "FAIL ${NAMES[$i]} (see logs/arc_q35_${NAMES[$i]}.log)"
+    fail=1
+  fi
+done
+if [ "$fail" -ne 0 ]; then
+  echo "== grid FAILED: at least one cell errored =="
+  exit 1
+fi
 echo "== grid done -> ckpt/arc_q35_<cell>_adapter/epoch_eval.json per cell =="
