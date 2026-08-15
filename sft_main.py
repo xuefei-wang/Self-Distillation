@@ -15,6 +15,9 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--num_train_epochs", type=int, default=1, help="Number of training epochs")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
+                        help="checkpoint-<step> dir to resume optimizer/scheduler/rng from "
+                             "(continue training to num_train_epochs total)")
     parser.add_argument("--per_device_train_batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=32)
     parser.add_argument("--peft", action="store_true", help="Use LoRA")
@@ -154,5 +157,5 @@ if __name__ == "__main__":
         processing_class=tokenizer,
         peft_config=peft_config,
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     trainer.save_model(args.output_dir)
