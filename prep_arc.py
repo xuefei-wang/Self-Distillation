@@ -39,8 +39,11 @@ SYSTEM = "You are a precise puzzle solver. Follow the output schema exactly."
 
 
 def _msgs(question: str) -> list:
-    """The chat turns every train/eval prompt carries: the fixed system turn + the question."""
-    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": question}]
+    """The chat turns every train/eval prompt carries: the question as a single user turn.
+    No system turn by default -- the ablation showed the system persona is neutral-to-mildly-
+    unhelpful (insight-nosys reached the grid's best delta), and the task instruction + schema
+    already live in the user turn. SYSTEM is kept only as a generation-time crutch (gen_insight_sft)."""
+    return [{"role": "user", "content": question}]
 
 
 def render_question(task: dict) -> str:
