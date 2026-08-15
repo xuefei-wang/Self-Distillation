@@ -244,10 +244,10 @@ Now answer with a response of your own.
 """)
         return {
             "prompt": example["messages"],
-            # Teacher sees the same system turn, then the question + privileged knowledge.
-            # messages = [system, user(question)]; [-1] is the question, [0] the system turn.
-            "teacher_prompt": [
-                example["messages"][0],
+            # Teacher sees any leading system turn (none by default), then the question +
+            # privileged knowledge. [-1] is always the question; a system turn is carried through
+            # only if present so this works for both [user] and [system, user] data.
+            "teacher_prompt": [m for m in example["messages"] if m["role"] == "system"] + [
                 {'role': 'user', 'content': teacher_prompt.substitute(
                     orig_content=example['messages'][-1]['content'],
                     output_text=privileged(example),
