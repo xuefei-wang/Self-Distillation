@@ -15,6 +15,10 @@ CU=$(cd .venv-qwen35-train/lib/python3.12/site-packages/nvidia/cu13 && pwd)
 MODEL=${MODEL:-ckpt/qwen35_9b_text_v2}
 LR=${LR:-1e-4}
 EPOCHS=${EPOCHS:-2}
+# SDFT prompts per optimizer step. TRL's RepeatSampler drops the ragged tail batch, so a value
+# that does not divide the train-set size skips those tasks each epoch. Left at a general default
+# (not tuned to a specific split size); override per run if you want the tail kept.
+NPPB=${NPPB:-32}
 MAXPROMPT=${MAXPROMPT:-8192}
 MAXCOMP=${MAXCOMP:-2048}
 SFT_MAXLEN=${SFT_MAXLEN:-8192}   # SFT loads the full 9B (no vLLM offload) + expanded-LoRA optimizer
@@ -86,7 +90,7 @@ sdft_cell () {  # $1=cell name, $2=gpu, $3=master_port, $4..=extra flags (teache
   CUDA_VISIBLE_DEVICES=$gpu MASTER_PORT=$port \
     $VENV main.py --dataset_name arc --model_name "$MODEL" --peft --lora_r 16 \
     --lora_target_modules "$LORA_TM" --learning_rate "$LR" --num_train_epochs "$EPOCHS" \
-    --per_device_train_batch_size 1 --num_prompts_per_batch 32 \
+    --per_device_train_batch_size 1 --num_prompts_per_batch "$NPPB" \
     --max_prompt_length "$MAXPROMPT" --max_completion_length "$MAXCOMP" \
     --vllm_gpu_memory_utilization "$VLLM_UTIL" --ema_teacher "$@" \
     --output_dir "ckpt/arc_q35_${name}_adapter" || { echo "FAIL $name: training"; return 1; }

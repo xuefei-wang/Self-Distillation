@@ -36,6 +36,9 @@ def parse_args():
     parser.add_argument("--max_length", type=int, default=3072,
                         help="Max packed sequence length (prompt+completion). ARC demonstrations are long "
                              "(~12k tokens); raise this so the trailing answer JSON isn't right-truncated.")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
+                        help="Path to a checkpoint-<step>/ dir to continue training from (restores "
+                             "optimizer/scheduler/RNG via the HF Trainer checkpoint machinery).")
     return parser.parse_args()
 
 
@@ -157,5 +160,5 @@ if __name__ == "__main__":
         processing_class=tokenizer,
         peft_config=peft_config,
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     trainer.save_model(args.output_dir)
