@@ -3,12 +3,12 @@
 Two artifacts are written under data/arc_data/:
 
   train_data/  the 381 gold-demonstration tasks from the ARC-AGI-1 *training* split.
-               Columns: messages=[{user: question}], output_text=<gold demonstration>.
+               Columns: messages=[{system}, {user: question}], output_text=<gold demonstration>.
                Mirrors the science schema so both main.py (SDFT) and sft_main.py (SFT)
                consume it. `output_text` is knowledge type #1 (Arm A: gold demonstration).
 
   eval_data/   the 400 ARC-AGI-1 *evaluation* split tasks (held out; disjoint from train).
-               Columns: prompt=[{user: question}], task_id, test_outputs=<oracle grids>.
+               Columns: prompt=[{system}, {user: question}], task_id, test_outputs=<oracle grids>.
 
 With --train_ids <path> the *training* split is instead cut into a train / val split:
 
@@ -32,6 +32,20 @@ INSTRUCTION = (
     '{"outputs":[<output grid for test 0>, ...]}.\n'
     "ARC task:\n"
 )
+
+# System turn the gold-demonstration teacher and the published Qwen3.5-9B eval number
+# (4.906% avg@8) were generated with. Kept verbatim so train, teacher and eval all share the
+# exact prompt the baseline was measured under; see arc-train93-split/README.md ("## Prompt").
+SYSTEM = "You are a precise puzzle solver. Follow the output schema exactly."
+
+
+def _msgs(question: str) -> list:
+    """Chat turns for a rollout question: a fixed system turn plus the user question.
+
+    Consumers must read the question as messages[-1] (the user turn) and any preceding
+    context as messages[:-1] — never by hardcoded index — so the schema can carry a system
+    turn without breaking SFT/SDFT prompt construction."""
+    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": question}]
 
 
 def render_question(task: dict) -> str:
@@ -63,7 +77,7 @@ def build_train(gold_path: str, data_root: str, keep_ids: set | None = None) -> 
             task = load_task(data_root, "training", g["task_id"])
             question = render_question(task)
             rows.append({
-                "messages": [{"role": "user", "content": question}],
+                "messages": _msgs(question),
                 "output_text": g["demonstration"],
                 "task_id": g["task_id"],
             })
@@ -90,7 +104,7 @@ def build_split_eval(data_root: str, split: str, keep_ids: set | None = None,
             continue
         task = load_task(data_root, split, task_id)
         rows.append({
-            "prompt": [{"role": "user", "content": render_question(task)}],
+            "prompt": _msgs(render_question(task)),
             "task_id": task_id,
             "test_outputs": [t["output"] for t in task["test"]],
         })
@@ -184,7 +198,7 @@ def main():
 
     # quick sanity: token-ish length of the longest demonstration
     maxdemo = max(len(r["output_text"]) for r in train)
-    maxq = max(len(r["messages"][0]["content"]) for r in train)
+    maxq = max(len(r["messages"][-1]["content"]) for r in train)  # [-1] = user turn; [0] is system
     print(f"max demonstration chars: {maxdemo} (~{maxdemo//4} tokens)")
     print(f"max question chars: {maxq} (~{maxq//4} tokens)")
 

@@ -80,12 +80,15 @@ def build_dataset(name, seed=42, arc_data_dir="data/arc_data/train_data") -> Dat
 
         dataset = dataset.map(format_example, remove_columns=dataset.column_names)
     elif name == "arc":
-        train_dir = arc_data_dir  # messages=[user question] + output_text=gold demonstration
+        train_dir = arc_data_dir  # messages=[system, user question] + output_text=gold demonstration
         dataset = load_from_disk(train_dir)
 
         def format_example(example):
             return {
-                "prompt": [example["messages"][0]],  # single user turn (no system message)
+                # Full prompt turns (system + user question); TRL masks these and computes loss
+                # only on the completion. Pass messages through rather than indexing a fixed
+                # position so an absent system turn does not silently drop the question.
+                "prompt": example["messages"],
                 "completion": [{"role": "assistant", "content": example["output_text"]}],
             }
 

@@ -185,8 +185,9 @@ def load_arc_dataset(seed=42, teacher_knowledge="demonstration",
                      insight_demo_dir=None) -> Dataset:
     """Load the ARC-AGI-1 train set (built by prep_arc.py) and build the SDFT teacher_prompt.
 
-    On-disk schema mirrors science (messages + output_text + task_id); messages holds a single
-    user turn (the rollout question), the student sees that alone. `teacher_knowledge` selects
+    On-disk schema mirrors science (messages + output_text + task_id); messages holds a system
+    turn followed by the user rollout question (messages[-1]), and the student sees both.
+    `teacher_knowledge` selects
     the privileged text the teacher is conditioned on:
       demonstration  the full gold CoT (Arm A, ~6.9k tok) — original behaviour;
       target         the bare oracle answer grid (~0.1k tok);
@@ -244,10 +245,12 @@ Now answer with a response of your own.
 """)
         return {
             "prompt": example["messages"],
-            # Teacher sees the same system turn, then the question + privileged knowledge.
-            # messages = [system, user(question)]; [-1] is the question, [0] the system turn.
-            "teacher_prompt": [
-                example["messages"][0],
+            # Teacher sees the same context turns as the student, then the question + privileged
+            # knowledge in place of the bare question. messages[-1] is the user question;
+            # messages[:-1] is everything before it (the system turn, if any) — indexing by
+            # slice keeps this correct whether or not a system turn is present, and never
+            # duplicates the question the way a hardcoded [0] did under the user-only schema.
+            "teacher_prompt": example["messages"][:-1] + [
                 {'role': 'user', 'content': teacher_prompt.substitute(
                     orig_content=example['messages'][-1]['content'],
                     output_text=privileged(example),
