@@ -36,8 +36,8 @@ def parse_args():
                         "<adapter_dir>/_merged")
     p.add_argument("--keep_merged", action="store_true",
                    help="Keep each merged full model (~18GB each). Default: delete after eval.")
-    p.add_argument("--band_map", default=os.path.expanduser("~/arc-train93-split/split_train93_val307.json"),
-                   help="split_train93_val307.json; used to break val accuracy down by band "
+    p.add_argument("--band_map", default="splits/arc_train93_val307.json",
+                   help="Versioned split file; used to break val accuracy down by band "
                         "(delta is the headroom; a 307-aggregate dilutes any effect ~8x).")
     p.add_argument("--max_new_tokens", type=int, default=12288, help="Passed to eval_arc.py")
     p.add_argument("--max_model_len", type=int, default=20480, help="Passed to eval_arc.py")

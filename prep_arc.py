@@ -113,11 +113,20 @@ def build_split_eval(data_root: str, split: str, keep_ids: set | None = None,
 
 
 def load_train_ids(path: str) -> list:
-    """Read the train-side task_ids: either a JSON array or a newline-delimited list."""
+    """Read the train-side task_ids from any of three forms:
+      - a JSON array of ids;
+      - the versioned split file splits/arc_train93_val307.json (a JSON object with a
+        `train_93` key — the biased 93/307 split, see splits/README.md);
+      - a newline-delimited list of ids."""
     with open(path) as f:
         text = f.read()
     stripped = text.strip()
-    if stripped.startswith("["):
+    if stripped.startswith("{"):
+        obj = json.loads(stripped)
+        if "train_93" not in obj:
+            raise ValueError(f"--train_ids {path}: JSON object has no 'train_93' key")
+        ids = obj["train_93"]
+    elif stripped.startswith("["):
         ids = json.loads(stripped)
     else:
         ids = [ln.strip() for ln in stripped.splitlines() if ln.strip()]

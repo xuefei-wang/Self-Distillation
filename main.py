@@ -76,6 +76,11 @@ def parse_args():
                              "(e.g. data/arc_data/sft_insight_data) for --teacher_knowledge insight_demo. The "
                              "student rolls out from a correct solution (like the gold arm) instead of the bare "
                              "rule, which fixes SDFT-insight. Pair with --sample_from_teacher_prompt.")
+    parser.add_argument("--min_insight_coverage", type=float, default=1.0,
+                        help="ARC insight/insight_demo arms: minimum fraction of train tasks that must have a "
+                             "knowledge entry. Uncovered tasks fall back to the oracle answer grid (answer "
+                             "leak), so the run fails fast below this threshold. Lower it (e.g. 0.0) to accept "
+                             "the fallback explicitly.")
     return parser.parse_args()
 
 def load_tooluse_dataset(seed=42) -> Dataset:
@@ -180,9 +185,24 @@ def _arc_target_text(arc_data_root, task_id):
     return json.dumps({"outputs": [t["output"] for t in task["test"]]}, separators=(",", ":"))
 
 
+def _check_insight_coverage(kind, have, total, min_coverage):
+    """Fail fast when too few tasks have a knowledge entry. Uncovered tasks fall back to the
+    ORACLE ANSWER GRID, so a partly-covered file silently turns the '{kind}' arm into an
+    answer-leaking 'target' arm for the missing tasks. Make that explicit instead of silent:
+    the run must either cover >= min_coverage of tasks or opt into the leak via a low threshold."""
+    frac = have / total if total else 0.0
+    if frac < min_coverage:
+        raise ValueError(
+            f"--teacher_knowledge {kind}: only {have}/{total} tasks ({frac:.1%}) have a "
+            f"{kind} entry; the remaining {total - have} would fall back to the oracle answer "
+            f"grid (answer leak). Provide fuller coverage, or lower --min_insight_coverage "
+            f"(currently {min_coverage:.2f}) to accept the fallback explicitly."
+        )
+
+
 def load_arc_dataset(seed=42, teacher_knowledge="demonstration",
                      arc_data_root="data/arc_agi_1", insight_path=None,
-                     insight_demo_dir=None) -> Dataset:
+                     insight_demo_dir=None, min_insight_coverage=1.0) -> Dataset:
     """Load the ARC-AGI-1 train set (built by prep_arc.py) and build the SDFT teacher_prompt.
 
     On-disk schema mirrors science (messages + output_text + task_id); messages holds a system
@@ -210,6 +230,7 @@ def load_arc_dataset(seed=42, teacher_knowledge="demonstration",
                 insights[o["task_id"]] = o["knowledge_text"]
         have = sum(1 for tid in dataset["task_id"] if tid in insights)
         print(f"insight coverage: {have}/{len(dataset)} tasks (rest fall back to target)")
+        _check_insight_coverage("insight", have, len(dataset), min_insight_coverage)
 
     insight_demos = {}
     if teacher_knowledge == "insight_demo":
@@ -223,6 +244,7 @@ def load_arc_dataset(seed=42, teacher_knowledge="demonstration",
         insight_demos = {r["task_id"]: r["output_text"] for r in demo_ds}
         have = sum(1 for tid in dataset["task_id"] if tid in insight_demos)
         print(f"insight_demo coverage: {have}/{len(dataset)} tasks (rest fall back to target)")
+        _check_insight_coverage("insight_demo", have, len(dataset), min_insight_coverage)
 
     def privileged(example):
         if teacher_knowledge == "demonstration":
@@ -317,7 +339,8 @@ if __name__ == "__main__":
         dataset, _ = load_medical_dataset(args.seed)
     elif args.dataset_name == "arc":
         dataset, _ = load_arc_dataset(args.seed, args.teacher_knowledge, args.arc_data_root,
-                                      args.insight_path, args.insight_demo_dir)
+                                      args.insight_path, args.insight_demo_dir,
+                                      args.min_insight_coverage)
         _preflight_teacher_lengths(dataset, tokenizer, args.max_prompt_length)
     else:
         raise ValueError(f"Invalid dataset name: {args.dataset_name}")

@@ -32,6 +32,9 @@ VAL_EVAL=${VAL_EVAL:-data/arc_data/val_eval_data}
 # Insight-knowledge inputs (TBD — the two insight cells are skipped until these exist)
 SFT_INSIGHT_DATA=${SFT_INSIGHT_DATA:-data/arc_data/sft_insight_data}
 INSIGHT_PATH=${INSIGHT_PATH:-data/arc_data/insights.jsonl}
+# Min fraction of train tasks that must carry an insight; below it main.py fails fast rather than
+# leaking the oracle answer grid for uncovered tasks. Lower (e.g. 0.0) to accept the fallback.
+MIN_INSIGHT_COV=${MIN_INSIGHT_COV:-1.0}
 
 SFT_GOLD_GPU=${SFT_GOLD_GPU:-4}
 SFT_INSIGHT_GPU=${SFT_INSIGHT_GPU:-5}
@@ -118,6 +121,7 @@ PIDS+=($!); NAMES+=(sdft_ema_gold)
 if [ -f "$INSIGHT_PATH" ]; then
   sdft_cell sdft_ema_insight "$SDFT_INSIGHT_GPU" 29503 \
     --teacher_knowledge insight --insight_path "$INSIGHT_PATH" \
+    --min_insight_coverage "$MIN_INSIGHT_COV" \
     > logs/arc_q35_sdft_ema_insight.log 2>&1 &
   PIDS+=($!); NAMES+=(sdft_ema_insight)
 else
